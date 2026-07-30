@@ -57,6 +57,7 @@ function contextPruner(pi) {
   });
   pi.registerTool({
     name: "context_prune",
+    label: "Context Prune",
     description: "Replace a previous tool result with a short summary to free context space. Use after processing results from search tools (knowledge_search, session_search, graph_query, code_search, session_read, code_overview). Pass either the tool_use_id or the tool_name (prunes the most recent call to that tool).",
     parameters: Type.Object({
       tool_use_id: Type.Optional(Type.String({ description: "tool_use_id of the result to replace" })),
