@@ -1,12 +1,10 @@
 // src/subagent.ts
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { spawn, execFileSync } from "node:child_process";
-import { readFile, unlink, access } from "node:fs/promises";
-import { existsSync, writeFileSync, createWriteStream, mkdirSync, unlinkSync, readdirSync, statSync } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { spawn, execFileSync as execFileSync2 } from "node:child_process";
+import { readFile, unlink } from "node:fs/promises";
+import { existsSync as existsSync2, writeFileSync as writeFileSync2, createWriteStream, unlinkSync as unlinkSync2 } from "node:fs";
+import { basename } from "node:path";
 
 // src/subagent-diagnostics.ts
 import { homedir } from "node:os";
@@ -173,54 +171,328 @@ ${partialOutputTrimmed}`);
   return parts.length === 0 ? "(no diagnostic information captured \u2014 check the post-mortem .jsonl)" : parts.join("\n\n");
 }
 
-// src/subagent.ts
-function emptyUsage() {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+// src/subagent-interactive.ts
+import { execFileSync } from "node:child_process";
+import { access } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
+var SUBAGENT_PREAMBLE = "IMPORTANT: You are running as a subagent. Do NOT spawn sub-subagents \u2014 do all the work yourself directly.";
+function completionBlock(resultFile) {
+  return [
+    "When you have completed the task, do these two things:",
+    `1. Use the write tool to save your complete findings/summary to ${resultFile}`,
+    `2. Then say "SUBAGENT COMPLETE" so I know you're done.`
+  ].join("\n");
 }
-function formatTokens(n) {
-  if (n < 1e3) return String(n);
-  if (n < 1e4) return `${(n / 1e3).toFixed(1)}k`;
-  if (n < 1e6) return `${Math.round(n / 1e3)}k`;
-  return `${(n / 1e6).toFixed(1)}M`;
+function frameInteractiveTask(task, resultFile, style) {
+  const completion = completionBlock(resultFile);
+  if (style === "herdr") {
+    return [task, "", SUBAGENT_PREAMBLE, "", completion].join("\n");
+  }
+  return `${task}
+
+${completion}`;
 }
-function formatUsage(u, model) {
-  const p = [];
-  if (u.turns) p.push(`${u.turns}t`);
-  if (u.input) p.push(`\u2191${formatTokens(u.input)}`);
-  if (u.output) p.push(`\u2193${formatTokens(u.output)}`);
-  if (u.cost) p.push(`$${u.cost.toFixed(3)}`);
-  if (model) p.push(model);
-  return p.join(" ");
-}
-function getFinalText(messages) {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === "assistant") {
-      const texts = [];
-      for (const part of msg.content) {
-        if (part.type === "text") texts.push(part.text);
-      }
-      if (texts.length > 0) return texts.join("").trim();
+function attachHint(backend) {
+  switch (backend.kind) {
+    case "tmux":
+      return `tmux select-window -t ${backend.target}`;
+    case "herdr":
+      return `herdr agent attach ${backend.agent}`;
+    default: {
+      const _exhaustive = backend;
+      return _exhaustive;
     }
   }
-  return "";
 }
-function getPiInvocation(args) {
-  const currentScript = process.argv[1];
-  const isBunVirtual = currentScript?.startsWith("/$bunfs/root/");
-  if (currentScript && !isBunVirtual && existsSync(currentScript)) {
-    return { command: process.execPath, args: [currentScript, ...args] };
+function backendLabel(backend) {
+  switch (backend.kind) {
+    case "tmux":
+      return "tmux window";
+    case "herdr":
+      return "herdr pane";
+    default: {
+      const _exhaustive = backend;
+      return _exhaustive;
+    }
   }
-  const execName = (process.execPath.split("/").pop() || "").toLowerCase();
-  if (!/^(node|bun)(\.exe)?$/.test(execName)) {
-    return { command: process.execPath, args };
+}
+function isTmuxTargetAlive(target) {
+  try {
+    execFileSync("tmux", ["display-message", "-t", target, "-p", ""], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
   }
-  return { command: "pi", args };
 }
-function elapsedStr(start, end) {
-  const s = ((end || Date.now()) - start) / 1e3;
-  return s < 60 ? `${s.toFixed(0)}s` : `${(s / 60).toFixed(1)}m`;
+function isHerdrPaneAlive(paneId) {
+  try {
+    execFileSync("herdr", ["pane", "get", paneId], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
+function isInteractiveAlive(backend) {
+  switch (backend.kind) {
+    case "tmux":
+      return isTmuxTargetAlive(backend.target);
+    case "herdr":
+      return isHerdrPaneAlive(backend.pane);
+    default: {
+      const _exhaustive = backend;
+      return _exhaustive;
+    }
+  }
+}
+function killInteractive(backend) {
+  switch (backend.kind) {
+    case "tmux":
+      try {
+        execFileSync("tmux", ["send-keys", "-t", backend.target, "C-c", ""], { stdio: "ignore" });
+        execFileSync("tmux", ["send-keys", "-t", backend.target, "exit", "Enter"], { stdio: "ignore" });
+      } catch {
+      }
+      break;
+    case "herdr":
+      try {
+        execFileSync("herdr", ["agent", "send-keys", backend.pane, "esc", "C-c"], { stdio: "ignore" });
+      } catch {
+      }
+      try {
+        execFileSync("herdr", ["pane", "close", backend.pane], { stdio: "ignore" });
+      } catch {
+      }
+      break;
+    default: {
+      const _exhaustive = backend;
+      return _exhaustive;
+    }
+  }
+}
+function watchInteractiveResult(opts) {
+  const {
+    resultFile,
+    isAlive,
+    injectResult,
+    onWatcherClear,
+    pollMs = 5e3,
+    successDelayMs = 3e3
+  } = opts;
+  return setInterval(async () => {
+    const alive = isAlive();
+    let resultExists = false;
+    try {
+      await access(resultFile);
+      resultExists = true;
+    } catch {
+    }
+    if (resultExists) {
+      if (alive) {
+        setTimeout(() => injectResult(), successDelayMs);
+        onWatcherClear?.();
+      } else {
+        injectResult();
+      }
+    } else if (!alive) {
+      injectResult();
+    }
+  }, pollMs);
+}
+function interactiveResultPaths(id) {
+  return {
+    resultFile: `/tmp/subagent-${id}-result.md`,
+    promptFile: `/tmp/subagent-${id}-prompt.md`,
+    errLog: `/tmp/subagent-${id}-err.log`
+  };
+}
+function assertHerdrInteractiveEnv() {
+  const parentPane = process.env.HERDR_PANE_ID;
+  if (!parentPane || process.env.HERDR_ENV !== "1") {
+    throw new Error(
+      "herdr interactive mode requires pi to be running inside a herdr pane (HERDR_ENV=1 + HERDR_PANE_ID). Use background mode or run pi inside herdr."
+    );
+  }
+  return parentPane;
+}
+function spawnTmuxInteractivePane(opts) {
+  const { tabLabel, cwd, framedTask, promptFile, onPasteFailed } = opts;
+  const tmuxName = tabLabel;
+  const piCmd = `env PI_TAB_LABEL=${tabLabel} pi`;
+  let parentSession = "";
+  try {
+    parentSession = execFileSync(
+      "tmux",
+      ["display-message", "-p", "#{session_name}"],
+      { encoding: "utf8" }
+    ).trim();
+  } catch {
+  }
+  let pasteTarget;
+  if (parentSession) {
+    pasteTarget = `${parentSession}:${tmuxName}`;
+    execFileSync("tmux", [
+      "new-window",
+      "-t",
+      parentSession,
+      "-n",
+      tmuxName,
+      "-c",
+      cwd,
+      piCmd
+    ], { stdio: "ignore" });
+  } else {
+    pasteTarget = tmuxName;
+    execFileSync("tmux", [
+      "new-session",
+      "-d",
+      "-s",
+      tmuxName,
+      "-c",
+      cwd,
+      piCmd
+    ], { stdio: "ignore" });
+    try {
+      execFileSync(
+        "tmux",
+        ["resize-window", "-t", tmuxName, "-x", "200", "-y", "50"],
+        { stdio: "ignore" }
+      );
+    } catch {
+    }
+  }
+  const maxWaitMs = 3e4;
+  const waitStart = Date.now();
+  const readyPoller = setInterval(() => {
+    try {
+      const pane = execFileSync(
+        "tmux",
+        ["capture-pane", "-t", pasteTarget, "-p"],
+        { encoding: "utf8" }
+      );
+      const ready = /\$\d+\.\d+/.test(pane);
+      if (!ready && Date.now() - waitStart < maxWaitMs) return;
+      clearInterval(readyPoller);
+      writeFileSync(promptFile, framedTask);
+      const bufferName = `${tmuxName}-prompt`;
+      execFileSync("tmux", ["load-buffer", "-b", bufferName, promptFile], { stdio: "ignore" });
+      execFileSync("tmux", ["paste-buffer", "-dp", "-b", bufferName, "-t", pasteTarget], { stdio: "ignore" });
+      execFileSync("tmux", ["send-keys", "-t", pasteTarget, "Enter"], { stdio: "ignore" });
+    } catch {
+      if (Date.now() - waitStart >= maxWaitMs) {
+        clearInterval(readyPoller);
+        onPasteFailed();
+      }
+    }
+  }, 1e3);
+  return { kind: "tmux", target: pasteTarget, tabLabel };
+}
+function spawnHerdrInteractivePane(opts) {
+  const { tabLabel, cwd, parentPane, framedTask } = opts;
+  const agentName = tabLabel;
+  let paneId;
+  try {
+    const raw = execFileSync("herdr", [
+      "pane",
+      "split",
+      "--pane",
+      parentPane,
+      "--direction",
+      "right",
+      "--cwd",
+      cwd,
+      "--env",
+      `PI_TAB_LABEL=${tabLabel}`
+    ], { encoding: "utf8" });
+    const parsed = JSON.parse(raw);
+    paneId = parsed?.result?.pane?.pane_id;
+    if (!paneId) throw new Error("herdr pane split returned no pane_id");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`herdr pane split failed: ${msg}`);
+  }
+  try {
+    execFileSync("herdr", ["pane", "rename", paneId, tabLabel], { stdio: "ignore" });
+  } catch {
+  }
+  try {
+    execFileSync("herdr", [
+      "agent",
+      "start",
+      agentName,
+      "--kind",
+      "pi",
+      "--pane",
+      paneId,
+      "--",
+      framedTask
+    ], { stdio: "ignore" });
+  } catch (e) {
+    try {
+      execFileSync("herdr", ["pane", "close", paneId], { stdio: "ignore" });
+    } catch {
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`herdr agent start failed: ${msg}`);
+  }
+  return { kind: "herdr", pane: paneId, agent: agentName, tabLabel };
+}
+function formatTmuxResultMessage(id, elapsed, result, failed, errMsg) {
+  if (failed) {
+    return `## Subagent \`${id}\` failed (${elapsed})
+
+${errMsg || "No output."}`;
+  }
+  return `## Subagent \`${id}\` completed (${elapsed})
+
+${result}`;
+}
+function formatHerdrResultMessage(id, tabLabel, agentName, elapsed, result, failed, errMsg) {
+  if (failed) {
+    return `## Subagent \`${id}\` failed (${elapsed})
+
+${errMsg || "No output. Pane may have been closed or pi failed to start."}`;
+  }
+  return `## Subagent \`${id}\` (${tabLabel}) completed (${elapsed})
+
+${result}
+
+_Steer it: \`herdr agent attach ${agentName}\` \u2014 pane left open._`;
+}
+function readHerdrRecentOutput(paneId) {
+  try {
+    return execFileSync(
+      "herdr",
+      ["agent", "read", paneId, "--source", "recent", "--lines", "20"],
+      { encoding: "utf8" }
+    ) || "";
+  } catch {
+    return "";
+  }
+}
+
+// src/subagent-naming.ts
+var HERDR_AGENT_NAME_MAX = 32;
+function taskSlug(task, max = 28) {
+  const s = task.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean).slice(0, 6).join("-");
+  return s.slice(0, max).replace(/-+$/, "");
+}
+function idSlug(id, max = 6) {
+  return id.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, max) || "x";
+}
+function uniqueLabel(task, id, max = HERDR_AGENT_NAME_MAX) {
+  const suffix = idSlug(id, 6);
+  const baseBudget = Math.max(1, max - 1 - suffix.length);
+  let base = taskSlug(task, baseBudget);
+  if (!base) base = taskSlug(`subagent ${id}`, baseBudget) || "sa";
+  if (!/^[a-z]/.test(base)) base = `a${base}`.slice(0, baseBudget);
+  return `${base}-${suffix}`.slice(0, max).replace(/-+$/, "");
+}
+
+// src/subagent-sessions.ts
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, unlinkSync, readdirSync, statSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join } from "node:path";
 var SUBAGENT_SESSION_DIR = join(homedir2(), ".pi", "agent", "subagent-sessions");
 function ensureSubagentSessionDir() {
   if (!existsSync(SUBAGENT_SESSION_DIR)) {
@@ -264,6 +536,62 @@ function relativeTime(ms) {
   if (ago < 864e5) return `${Math.floor(ago / 36e5)}h ago`;
   return `${Math.floor(ago / 864e5)}d ago`;
 }
+
+// src/subagent.ts
+function emptyUsage() {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+}
+function formatTokens(n) {
+  if (n < 1e3) return String(n);
+  if (n < 1e4) return `${(n / 1e3).toFixed(1)}k`;
+  if (n < 1e6) return `${Math.round(n / 1e3)}k`;
+  return `${(n / 1e6).toFixed(1)}M`;
+}
+function formatUsage(u, model) {
+  const p = [];
+  if (u.turns) p.push(`${u.turns}t`);
+  if (u.input) p.push(`\u2191${formatTokens(u.input)}`);
+  if (u.output) p.push(`\u2193${formatTokens(u.output)}`);
+  if (u.cost) p.push(`$${u.cost.toFixed(3)}`);
+  if (model) p.push(model);
+  return p.join(" ");
+}
+function getFinalText(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === "assistant") {
+      const texts = [];
+      for (const part of msg.content) {
+        if (part.type === "text") texts.push(part.text);
+      }
+      if (texts.length > 0) return texts.join("").trim();
+    }
+  }
+  return "";
+}
+function getPiInvocation(args) {
+  const currentScript = process.argv[1];
+  const isBunVirtual = currentScript?.startsWith("/$bunfs/root/");
+  if (currentScript && !isBunVirtual && existsSync2(currentScript)) {
+    return { command: process.execPath, args: [currentScript, ...args] };
+  }
+  const execName = (process.execPath.split("/").pop() || "").toLowerCase();
+  if (!/^(node|bun)(\.exe)?$/.test(execName)) {
+    return { command: process.execPath, args };
+  }
+  return { command: "pi", args };
+}
+function elapsedStr(start, end) {
+  const s = ((end || Date.now()) - start) / 1e3;
+  return s < 60 ? `${s.toFixed(0)}s` : `${(s / 60).toFixed(1)}m`;
+}
+function frameBackgroundTask(task) {
+  return [
+    "IMPORTANT: You are running as a subagent. Do NOT spawn sub-subagents \u2014 do all the work yourself directly.",
+    "",
+    task
+  ].join("\n");
+}
 function subagent_default(pi) {
   const active = /* @__PURE__ */ new Map();
   let widgetCtx = null;
@@ -300,22 +628,8 @@ function subagent_default(pi) {
         }
       }, 5e3);
     }
-    if (run.mode === "interactive" && run.tmuxSession) {
-      try {
-        execFileSync("tmux", ["send-keys", "-t", run.tmuxSession, "C-c", ""], { stdio: "ignore" });
-        execFileSync("tmux", ["send-keys", "-t", run.tmuxSession, "exit", "Enter"], { stdio: "ignore" });
-      } catch {
-      }
-    }
-    if (run.mode === "interactive" && run.herdrPane) {
-      try {
-        execFileSync("herdr", ["agent", "send-keys", run.herdrPane, "esc", "C-c"], { stdio: "ignore" });
-      } catch {
-      }
-      try {
-        execFileSync("herdr", ["pane", "close", run.herdrPane], { stdio: "ignore" });
-      } catch {
-      }
+    if (run.mode === "interactive" && run.backend) {
+      killInteractive(run.backend);
     }
     run.exitCode = reason === "timeout" ? 124 : 130;
     run.finishedAt = Date.now();
@@ -343,11 +657,6 @@ The subagent was ${label}.`,
       messages: [],
       usage: emptyUsage()
     };
-    const framedTask = [
-      "IMPORTANT: You are running as a subagent. Do NOT spawn sub-subagents \u2014 do all the work yourself directly.",
-      "",
-      task
-    ].join("\n");
     const sessionId = stableSubagentSessionId(id);
     run.subagentSessionId = sessionId;
     ensureSubagentSessionDir();
@@ -359,7 +668,7 @@ The subagent was ${label}.`,
       sessionId,
       "--session-dir",
       SUBAGENT_SESSION_DIR,
-      framedTask
+      frameBackgroundTask(task)
     ];
     const invocation = getPiInvocation(piArgs);
     const proc = spawn(invocation.command, invocation.args, {
@@ -404,7 +713,7 @@ The subagent was ${label}.`,
       const isError = run.exitCode !== 0 || run.signal !== void 0 || run.stopReason === "error" || run.stopReason === "aborted";
       const resultPath = `/tmp/subagent-${id}-result.md`;
       try {
-        writeFileSync(resultPath, output || "(no output)");
+        writeFileSync2(resultPath, output || "(no output)");
       } catch {
       }
       if (!isError && run.subagentSessionId) {
@@ -537,89 +846,38 @@ ${output}`;
     proc.unref();
     return run;
   }
-  function isTmuxTargetAlive(target) {
-    try {
-      execFileSync("tmux", ["display-message", "-t", target, "-p", ""], { stdio: "ignore" });
-      return true;
-    } catch {
-      return false;
+  function settleInteractiveRun(run) {
+    if (run.timeoutTimer) {
+      clearTimeout(run.timeoutTimer);
+      run.timeoutTimer = void 0;
     }
+    if (run.watcher) clearInterval(run.watcher);
+    active.delete(run.id);
+    updateWidget();
+  }
+  function injectInteractiveResult(run, content, promptFile) {
+    settleInteractiveRun(run);
+    pi.sendMessage(
+      { customType: "subagent-result", content, display: true },
+      { triggerTurn: true, deliverAs: "followUp" }
+    );
+    if (promptFile) unlink(promptFile).catch(() => {
+    });
+  }
+  function startInteractiveWatcher(run, injectResult) {
+    run.watcher = watchInteractiveResult({
+      resultFile: run.resultFile,
+      isAlive: () => isInteractiveAlive(run.backend),
+      injectResult,
+      onWatcherClear: () => {
+        if (run.watcher) clearInterval(run.watcher);
+      }
+    });
   }
   function spawnInteractiveTmux(id, task, cwd) {
-    const tmuxName = `subagent-${id}`;
-    const resultFile = `/tmp/subagent-${id}-result.md`;
-    const promptFile = `/tmp/subagent-${id}-prompt.md`;
-    let parentSession = "";
-    try {
-      parentSession = execFileSync(
-        "tmux",
-        ["display-message", "-p", "#{session_name}"],
-        { encoding: "utf8" }
-      ).trim();
-    } catch {
-    }
-    let pasteTarget;
-    if (parentSession) {
-      pasteTarget = `${parentSession}:${tmuxName}`;
-      execFileSync("tmux", [
-        "new-window",
-        "-t",
-        parentSession,
-        "-n",
-        tmuxName,
-        "-c",
-        cwd,
-        "pi"
-      ], { stdio: "ignore" });
-    } else {
-      pasteTarget = tmuxName;
-      execFileSync("tmux", [
-        "new-session",
-        "-d",
-        "-s",
-        tmuxName,
-        "-c",
-        cwd,
-        "pi"
-      ], { stdio: "ignore" });
-      try {
-        execFileSync(
-          "tmux",
-          ["resize-window", "-t", tmuxName, "-x", "200", "-y", "50"],
-          { stdio: "ignore" }
-        );
-      } catch {
-      }
-    }
-    const framedTask = `${task}
-
-When you have completed the task, do these two things:
-1. Use the write tool to save your complete findings/summary to ${resultFile}
-2. Then say "SUBAGENT COMPLETE" so I know you're done.`;
-    const maxWaitMs = 3e4;
-    const waitStart = Date.now();
-    const readyPoller = setInterval(() => {
-      try {
-        const pane = execFileSync(
-          "tmux",
-          ["capture-pane", "-t", pasteTarget, "-p"],
-          { encoding: "utf8" }
-        );
-        const ready = /\$\d+\.\d+/.test(pane);
-        if (!ready && Date.now() - waitStart < maxWaitMs) return;
-        clearInterval(readyPoller);
-        writeFileSync(promptFile, framedTask);
-        const bufferName = `${tmuxName}-prompt`;
-        execFileSync("tmux", ["load-buffer", "-b", bufferName, promptFile], { stdio: "ignore" });
-        execFileSync("tmux", ["paste-buffer", "-dp", "-b", bufferName, "-t", pasteTarget], { stdio: "ignore" });
-        execFileSync("tmux", ["send-keys", "-t", pasteTarget, "Enter"], { stdio: "ignore" });
-      } catch {
-        if (Date.now() - waitStart >= maxWaitMs) {
-          clearInterval(readyPoller);
-          injectResult();
-        }
-      }
-    }, 1e3);
+    const tabLabel = uniqueLabel(task, id);
+    const { resultFile, promptFile, errLog } = interactiveResultPaths(id);
+    const framedTask = frameInteractiveTask(task, resultFile, "tmux");
     const run = {
       id,
       task,
@@ -627,123 +885,39 @@ When you have completed the task, do these two things:
       startTime: Date.now(),
       messages: [],
       usage: emptyUsage(),
-      tmuxSession: pasteTarget,
       resultFile
     };
     const injectResult = async () => {
       const elapsed = elapsedStr(run.startTime);
-      if (run.timeoutTimer) {
-        clearTimeout(run.timeoutTimer);
-        run.timeoutTimer = void 0;
-      }
-      if (run.watcher) clearInterval(run.watcher);
-      active.delete(id);
-      updateWidget();
       let content;
       try {
         const result = await readFile(resultFile, "utf8");
-        content = `## Subagent \`${id}\` completed (${elapsed})
-
-${result}`;
+        content = formatTmuxResultMessage(id, elapsed, result, false);
       } catch {
         let errMsg = "";
         try {
-          errMsg = await readFile(`/tmp/subagent-${id}-err.log`, "utf8");
+          errMsg = await readFile(errLog, "utf8");
         } catch {
         }
-        content = `## Subagent \`${id}\` failed (${elapsed})
-
-${errMsg || "No output."}`;
+        content = formatTmuxResultMessage(id, elapsed, "", true, errMsg);
       }
-      pi.sendMessage(
-        { customType: "subagent-result", content, display: true },
-        { triggerTurn: true, deliverAs: "followUp" }
-      );
-      unlink(`/tmp/subagent-${id}-prompt.md`).catch(() => {
-      });
+      injectInteractiveResult(run, content, promptFile);
     };
-    run.watcher = setInterval(async () => {
-      const alive = isTmuxTargetAlive(pasteTarget);
-      let resultExists = false;
-      try {
-        await access(resultFile);
-        resultExists = true;
-      } catch {
-      }
-      if (resultExists) {
-        if (alive) {
-          setTimeout(() => injectResult(), 3e3);
-          if (run.watcher) clearInterval(run.watcher);
-        } else {
-          injectResult();
-        }
-      } else if (!alive) {
-        injectResult();
-      }
-    }, 5e3);
+    run.backend = spawnTmuxInteractivePane({
+      tabLabel,
+      cwd,
+      framedTask,
+      promptFile,
+      onPasteFailed: injectResult
+    });
+    startInteractiveWatcher(run, injectResult);
     return run;
   }
-  function isHerdrPaneAlive(paneId) {
-    try {
-      execFileSync("herdr", ["pane", "get", paneId], { stdio: "ignore" });
-      return true;
-    } catch {
-      return false;
-    }
-  }
   function spawnInteractiveHerdr(id, task, cwd) {
-    const parentPane = process.env.HERDR_PANE_ID;
-    if (!parentPane || process.env.HERDR_ENV !== "1") {
-      throw new Error("herdr interactive mode requires pi to be running inside a herdr pane (HERDR_ENV=1 + HERDR_PANE_ID). Use background mode or run pi inside herdr.");
-    }
-    let paneId;
-    try {
-      const raw = execFileSync("herdr", [
-        "pane",
-        "split",
-        "--pane",
-        parentPane,
-        "--direction",
-        "right",
-        "--cwd",
-        cwd
-      ], { encoding: "utf8" });
-      const parsed = JSON.parse(raw);
-      paneId = parsed?.result?.pane?.pane_id;
-      if (!paneId) throw new Error("herdr pane split returned no pane_id");
-    } catch (e) {
-      throw new Error(`herdr pane split failed: ${e?.message || e}`);
-    }
-    const resultFile = `/tmp/subagent-${id}-result.md`;
-    const framedTask = [
-      "IMPORTANT: You are running as a subagent. Do NOT spawn sub-subagents \u2014 do all the work yourself directly.",
-      "",
-      task,
-      "",
-      `When you have completed the task, do these two things:`,
-      `1. Use the write tool to save your complete findings/summary to ${resultFile}`,
-      `2. Then say "SUBAGENT COMPLETE" so I know you're done.`
-    ].join("\n");
-    const agentName = `subagent-${id}`;
-    try {
-      execFileSync("herdr", [
-        "agent",
-        "start",
-        agentName,
-        "--kind",
-        "pi",
-        "--pane",
-        paneId,
-        "--",
-        framedTask
-      ], { stdio: "ignore" });
-    } catch (e) {
-      try {
-        execFileSync("herdr", ["pane", "close", paneId], { stdio: "ignore" });
-      } catch {
-      }
-      throw new Error(`herdr agent start failed: ${e?.message || e}`);
-    }
+    const parentPane = assertHerdrInteractiveEnv();
+    const tabLabel = uniqueLabel(task, id);
+    const { resultFile } = interactiveResultPaths(id);
+    const framedTask = frameInteractiveTask(task, resultFile, "herdr");
     const run = {
       id,
       task,
@@ -751,64 +925,30 @@ ${errMsg || "No output."}`;
       startTime: Date.now(),
       messages: [],
       usage: emptyUsage(),
-      herdrPane: paneId,
       resultFile
     };
     const injectResult = async () => {
       const elapsed = elapsedStr(run.startTime);
-      if (run.timeoutTimer) {
-        clearTimeout(run.timeoutTimer);
-        run.timeoutTimer = void 0;
-      }
-      if (run.watcher) clearInterval(run.watcher);
-      active.delete(id);
-      updateWidget();
+      const backend = run.backend;
+      const agentName = backend.kind === "herdr" ? backend.agent : tabLabel;
       let content;
       try {
         const result = await readFile(resultFile, "utf8");
-        content = `## Subagent \`${id}\` completed (${elapsed})
-
-${result}
-
-_Steer it: \`herdr agent attach ${paneId}\` \u2014 pane left open._`;
+        content = formatHerdrResultMessage(id, tabLabel, agentName, elapsed, result, false);
       } catch {
-        let errMsg = "";
-        try {
-          errMsg = execFileSync(
-            "herdr",
-            ["agent", "read", paneId, "--source", "recent", "--lines", "20"],
-            { encoding: "utf8" }
-          ) || "";
-        } catch {
-        }
-        content = `## Subagent \`${id}\` failed (${elapsed})
-
-${errMsg || "No output. Pane may have been closed or pi failed to start."}`;
+        const paneId = backend.kind === "herdr" ? backend.pane : "";
+        const errMsg = paneId ? readHerdrRecentOutput(paneId) : "";
+        content = formatHerdrResultMessage(id, tabLabel, agentName, elapsed, "", true, errMsg);
       }
-      pi.sendMessage(
-        { customType: "subagent-result", content, display: true },
-        { triggerTurn: true, deliverAs: "followUp" }
-      );
+      injectInteractiveResult(run, content);
     };
-    run.watcher = setInterval(async () => {
-      const alive = isHerdrPaneAlive(paneId);
-      let resultExists = false;
-      try {
-        await access(resultFile);
-        resultExists = true;
-      } catch {
-      }
-      if (resultExists) {
-        if (alive) {
-          setTimeout(() => injectResult(), 3e3);
-          if (run.watcher) clearInterval(run.watcher);
-        } else {
-          injectResult();
-        }
-      } else if (!alive) {
-        injectResult();
-      }
-    }, 5e3);
+    run.backend = spawnHerdrInteractivePane({
+      tabLabel,
+      cwd,
+      parentPane,
+      framedTask
+    });
+    startInteractiveWatcher(run, injectResult);
     return run;
   }
   pi.on("session_start", async (_event, ctx) => {
@@ -875,7 +1015,7 @@ ${errMsg || "No output. Pane may have been closed or pi failed to start."}`;
         const inHerdr = process.env.HERDR_ENV === "1" && !!process.env.HERDR_PANE_ID;
         if (!inHerdr) {
           try {
-            execFileSync("tmux", ["-V"], { stdio: "ignore" });
+            execFileSync2("tmux", ["-V"], { stdio: "ignore" });
           } catch {
             throw new Error(
               "interactive mode needs herdr or tmux; retry with interactive:false for a background subagent."
@@ -887,16 +1027,22 @@ ${errMsg || "No output. Pane may have been closed or pi failed to start."}`;
         run2.timeoutTimer = setTimeout(() => killRun(run2, "timeout"), timeoutMs);
         active.set(id, run2);
         updateWidget();
-        const backend = run2.tmuxSession ? "tmux window" : "herdr pane";
-        const attach = run2.tmuxSession ? `tmux select-window -t ${run2.tmuxSession}` : `herdr agent attach ${run2.herdrPane}`;
+        const backend = run2.backend;
+        const labelTxt = backend.tabLabel ? ` \u201C${backend.tabLabel}\u201D` : "";
         return {
           content: [{
             type: "text",
-            text: `Subagent '${id}' spawned in ${backend}. Switch to it:
-  ${attach}
+            text: `Subagent '${id}'${labelTxt} spawned in ${backendLabel(backend)}. Switch to it:
+  ${attachHint(backend)}
 Results will auto-inject when complete.`
           }],
-          details: { id, mode: "interactive", tmuxSession: run2.tmuxSession, herdrPane: run2.herdrPane, cwd }
+          details: {
+            id,
+            mode: "interactive",
+            backend: backend.kind,
+            tabLabel: backend.tabLabel,
+            cwd
+          }
         };
       }
       const run = spawnBackground(id, task, cwd);
@@ -926,14 +1072,14 @@ Results will auto-inject when complete.`
           details: { count: 0, ids: [] }
         };
       }
-      const now = Date.now();
       const lines = Array.from(active.entries()).map(([id, run]) => {
         const elapsed = elapsedStr(run.startTime);
-        const mode = run.mode === "interactive" ? run.herdrPane ? "herdr" : "tmux" : "bg";
+        const mode = run.mode === "interactive" ? run.backend?.kind === "herdr" ? "herdr" : "tmux" : "bg";
         const activity = run.lastToolCall ? ` \u2014 ${run.lastToolCall}` : "";
         const usage = run.usage.turns > 0 ? ` [${formatUsage(run.usage)}]` : "";
-        const attach = run.tmuxSession ? ` \u2014 \`tmux select-window -t ${run.tmuxSession}\`` : run.herdrPane ? ` \u2014 \`herdr agent attach ${run.herdrPane}\`` : "";
-        return `- **${id}** [${mode}] ${elapsed}${activity}${usage}${attach}`;
+        const label = run.backend?.tabLabel ? ` \u201C${run.backend.tabLabel}\u201D` : "";
+        const attach = run.backend ? ` \u2014 \`${attachHint(run.backend)}\`` : "";
+        return `- **${id}**${label} [${mode}] ${elapsed}${activity}${usage}${attach}`;
       });
       return {
         content: [{
@@ -983,7 +1129,7 @@ ${lines.join("\n")}`
         let n = 0;
         for (const f of files2) {
           try {
-            unlinkSync(f.file);
+            unlinkSync2(f.file);
             n++;
           } catch {
           }
@@ -997,7 +1143,7 @@ ${lines.join("\n")}`
           ctx.ui.notify("No crashed subagent sessions on disk.", "info");
           return;
         }
-        const lines = files2.map((f) => `- ${f.file.replace(SUBAGENT_SESSION_DIR + "/", "")}  (${relativeTime(f.mtime)})`);
+        const lines = files2.map((f) => `- ${basename(f.file)}  (${relativeTime(f.mtime)})`);
         ctx.ui.notify(`Crashed subagent sessions:
 ${lines.join("\n")}`, "info");
         return;
@@ -1007,15 +1153,13 @@ ${lines.join("\n")}`, "info");
         ctx.ui.notify("No crashed subagent sessions to resume (clean runs delete their own files).", "info");
         return;
       }
-      const options = files.map((f) => {
-        const name = f.file.replace(SUBAGENT_SESSION_DIR + "/", "");
-        return `${name}  (${relativeTime(f.mtime)})`;
-      });
+      const options = files.map((f) => `${basename(f.file)}  (${relativeTime(f.mtime)})`);
       const choice = await ctx.ui.select("Resume a crashed subagent session:", options);
       if (!choice) return;
-      const basename = choice.replace(/\s+\([^)]*\)\s*$/, "");
-      const fullPath = join(SUBAGENT_SESSION_DIR, basename);
-      await ctx.switchSession(fullPath, {
+      const idx = options.indexOf(choice);
+      if (idx < 0) return;
+      const selected = files[idx];
+      await ctx.switchSession(selected.file, {
         withSession: async (newCtx) => {
           newCtx.ui.notify("Switched into crashed subagent session \u2014 continue from here.", "info");
         }

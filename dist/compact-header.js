@@ -1,6 +1,38 @@
 // src/compact-header.ts
-import { VERSION } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { readFileSync, realpathSync } from "node:fs";
+import { dirname } from "node:path";
+function resolveHostPiVersionFrom(startDir) {
+  let nestedFallback;
+  let dir = startDir;
+  for (let i = 0; i < 40 && dir !== "/"; i++) {
+    try {
+      const pkg = JSON.parse(readFileSync(`${dir}/package.json`, "utf8"));
+      if (pkg?.name === "@earendil-works/pi-coding-agent" && typeof pkg.version === "string") {
+        return pkg.version;
+      }
+    } catch {
+    }
+    if (nestedFallback === void 0) {
+      try {
+        nestedFallback = JSON.parse(
+          readFileSync(`${dir}/node_modules/@earendil-works/pi-coding-agent/package.json`, "utf8")
+        ).version;
+      } catch {
+      }
+    }
+    dir = dirname(dir);
+  }
+  return nestedFallback ?? "unknown";
+}
+function getHostPiVersion() {
+  try {
+    return resolveHostPiVersionFrom(dirname(realpathSync(process.argv[1])));
+  } catch {
+    return "unknown";
+  }
+}
+var PI_VERSION = getHostPiVersion();
 function compact_header_default(pi) {
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
@@ -29,7 +61,7 @@ function compact_header_default(pi) {
         const leftW = Math.max(20, width - rightW);
         const lk = 9;
         const lCol = [
-          [d("version"), a(`v${VERSION}  ${provider}`)],
+          [d("version"), a(`v${PI_VERSION}  ${provider}`)],
           [d("model"), a(model)],
           [d("think"), a(thinking)],
           [d(""), d("")],
@@ -54,6 +86,7 @@ function compact_header_default(pi) {
   });
 }
 export {
-  compact_header_default as default
+  compact_header_default as default,
+  resolveHostPiVersionFrom
 };
 //# sourceMappingURL=compact-header.js.map

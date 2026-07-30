@@ -39,7 +39,9 @@
     "prepare": "npm run build"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.80.3",
+    "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@earendil-works/pi-tui": "^0.83.0",
     "@sinclair/typebox": "^0.34.49",
     "@types/node": "^26.1.0",
     "esbuild": "^0.28.0",
