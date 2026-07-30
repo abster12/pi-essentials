@@ -2,18 +2,27 @@
  * Subagent Extension — fire-and-forget with streaming progress.
  *
  * Two modes:
- *   - background (default): Spawns `pi --mode json -p --no-session`.
- *     Returns immediately. Parses JSON events in background for live
- *     widget updates. Injects result via sendMessage when done.
- *   - interactive: Full pi in a tmux window. Same as before.
+ *   - background (default): Spawns `pi --mode json -p` with a per-task
+ *     --session-id + --session-dir so the run is durable. Returns immediately.
+ *     Parses JSON events in background for live widget updates. Injects result
+ *     via sendMessage when done. On clean exit the session file is deleted; on
+ *     crash/kill/credits-death it survives and is recoverable via /resume-subagent.
+ *   - interactive: Full pi in a real pane you can steer. When pi is running
+ *     inside herdr (HERDR_ENV=1), spawns into a new herdr pane via `herdr pane
+ *     split` + `herdr agent start --kind pi --pane <id>` — steer it with
+ *     `herdr agent prompt` / `herdr agent attach <pane>`. Otherwise falls back
+ *     to the original tmux-backed mode. Results auto-inject when complete,
+ *     same watcher pattern in both.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { writeFile, readFile, unlink, access } from "node:fs/promises";
-import { existsSync, writeFileSync, createWriteStream, type WriteStream } from "node:fs";
+import { existsSync, writeFileSync, createWriteStream, mkdirSync, unlinkSync, readdirSync, statSync, type WriteStream } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import {
   buildActivityTrail,
@@ -49,8 +58,13 @@ interface TrackedRun {
   errorMessage?: string;
   lastToolCall?: string;
   proc?: ChildProcess;
-  // Interactive-only
+  // Durability: stable session id used for --session-id; file is deleted on clean exit.
+  subagentSessionId?: string;
+  // Interactive-only: attach hint for whichever backend this run uses.
+  // tmuxSession for the tmux path; herdrPane for the herdr path. The widget /
+  // status / kill logic branch on whichever is set.
   tmuxSession?: string;
+  herdrPane?: string;
   resultFile?: string;
   watcher?: ReturnType<typeof setInterval>;
   // Timeout
@@ -116,6 +130,57 @@ function elapsedStr(start: number, end?: number): string {
   return s < 60 ? `${s.toFixed(0)}s` : `${(s / 60).toFixed(1)}m`;
 }
 
+// ── Durability: per-task session persistence for crash recovery ──────
+// Background subagents run with --session-id <stable> --session-dir <dir> so
+// each run's full transcript is persisted to disk. On clean exit the file is
+// deleted; on crash / kill / credits-death it survives, and /resume-subagent
+// can switch the parent session back into it to continue the work.
+
+const SUBAGENT_SESSION_DIR = join(homedir(), ".pi", "agent", "subagent-sessions");
+
+function ensureSubagentSessionDir(): void {
+  if (!existsSync(SUBAGENT_SESSION_DIR)) {
+    mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true });
+  }
+}
+
+function stableSubagentSessionId(id: string): string {
+  return `subagent-${id}-${randomBytes(4).toString("hex")}`;
+}
+
+function deleteSubagentSessionFile(sessionId: string): void {
+  try {
+    for (const f of readdirSync(SUBAGENT_SESSION_DIR)) {
+      if (f.endsWith(`_${sessionId}.jsonl`)) {
+        unlinkSync(join(SUBAGENT_SESSION_DIR, f));
+      }
+    }
+  } catch {}
+}
+
+function listSubagentSessionFiles(): { file: string; mtime: number }[] {
+  try {
+    const out: { file: string; mtime: number }[] = [];
+    for (const f of readdirSync(SUBAGENT_SESSION_DIR)) {
+      if (!f.endsWith(".jsonl")) continue;
+      const full = join(SUBAGENT_SESSION_DIR, f);
+      try { out.push({ file: full, mtime: statSync(full).mtimeMs }); } catch {}
+    }
+    out.sort((a, b) => b.mtime - a.mtime);
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function relativeTime(ms: number): string {
+  const ago = Date.now() - ms;
+  if (ago < 60_000) return "just now";
+  if (ago < 3_600_000) return `${Math.floor(ago / 60_000)}m ago`;
+  if (ago < 86_400_000) return `${Math.floor(ago / 3_600_000)}h ago`;
+  return `${Math.floor(ago / 86_400_000)}d ago`;
+}
+
 // ── Extension ──────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -165,6 +230,19 @@ export default function (pi: ExtensionAPI) {
       } catch {}
     }
 
+    if (run.mode === "interactive" && run.herdrPane) {
+      // Abort pi's current turn (Escape), then close the pane. Symmetric with
+      // the tmux path which sends C-c + exit. Closing the pane is the right
+      // move on timeout/kill (subagent is unresponsive / cancelled); on clean
+      // completion the watcher leaves the pane open for the user to steer.
+      try {
+        execFileSync("herdr", ["agent", "send-keys", run.herdrPane, "esc", "C-c"], { stdio: "ignore" });
+      } catch {}
+      try {
+        execFileSync("herdr", ["pane", "close", run.herdrPane], { stdio: "ignore" });
+      } catch {}
+    }
+
     run.exitCode = reason === "timeout" ? 124 : 130;
     run.finishedAt = Date.now();
     const elapsed = elapsedStr(run.startTime, run.finishedAt);
@@ -207,7 +285,17 @@ export default function (pi: ExtensionAPI) {
       "",
       task,
     ].join("\n");
-    const piArgs: string[] = ["--mode", "json", "-p", "--no-session", framedTask];
+    const sessionId = stableSubagentSessionId(id);
+    run.subagentSessionId = sessionId;
+    ensureSubagentSessionDir();
+    // Persist this run to a dedicated session dir so a crash / kill / credits-death
+    // is recoverable via /resume-subagent. File is deleted on clean exit below.
+    const piArgs: string[] = [
+      "--mode", "json", "-p",
+      "--session-id", sessionId,
+      "--session-dir", SUBAGENT_SESSION_DIR,
+      framedTask,
+    ];
     const invocation = getPiInvocation(piArgs);
 
     const proc = spawn(invocation.command, invocation.args, {
@@ -267,6 +355,12 @@ export default function (pi: ExtensionAPI) {
       // Write result file for interop
       const resultPath = `/tmp/subagent-${id}-result.md`;
       try { writeFileSync(resultPath, output || "(no output)"); } catch {}
+
+      // Durability: on clean exit, delete the per-task session file so only
+      // crashed/killed/credits-dead runs survive for /resume-subagent.
+      if (!isError && run.subagentSessionId) {
+        deleteSubagentSessionFile(run.subagentSessionId);
+      }
 
       // Build injection message
       const usageStr = formatUsage(run.usage, run.model);
@@ -409,15 +503,17 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ── Interactive mode: tmux ──
+  // Fallback backend when pi is not running inside herdr. Keeps the original
+  // tmux-based paste-buffer + watcher flow for non-herdr users.
 
-  function isTargetAlive(target: string): boolean {
+  function isTmuxTargetAlive(target: string): boolean {
     try {
       execFileSync("tmux", ["display-message", "-t", target, "-p", ""], { stdio: "ignore" });
       return true;
     } catch { return false; }
   }
 
-  function spawnInteractive(id: string, task: string, cwd: string): TrackedRun {
+  function spawnInteractiveTmux(id: string, task: string, cwd: string): TrackedRun {
     const tmuxName = `subagent-${id}`;
     const resultFile = `/tmp/subagent-${id}-result.md`;
     const promptFile = `/tmp/subagent-${id}-prompt.md`;
@@ -512,7 +608,7 @@ When you have completed the task, do these two things:
     };
 
     run.watcher = setInterval(async () => {
-      const alive = isTargetAlive(pasteTarget);
+      const alive = isTmuxTargetAlive(pasteTarget);
       let resultExists = false;
       try { await access(resultFile); resultExists = true; } catch {}
 
@@ -524,6 +620,135 @@ When you have completed the task, do these two things:
           injectResult();
         }
       } else if (!alive) {
+        injectResult();
+      }
+    }, 5000);
+
+    return run;
+  }
+
+  // ── Interactive mode: herdr ──
+  // Preferred backend when pi runs inside herdr (HERDR_ENV=1). Splits a new
+  // pane off the parent, starts pi in it via `herdr agent start --kind pi`, and
+  // watches the same resultFile as the tmux path. The pane stays open on
+  // clean completion so the user can `herdr agent attach <pane>` to steer.
+
+  function isHerdrPaneAlive(paneId: string): boolean {
+    try {
+      execFileSync("herdr", ["pane", "get", paneId], { stdio: "ignore" });
+      return true;
+    } catch { return false; }
+  }
+
+  function spawnInteractiveHerdr(id: string, task: string, cwd: string): TrackedRun {
+    const parentPane = process.env.HERDR_PANE_ID;
+    if (!parentPane || process.env.HERDR_ENV !== "1") {
+      throw new Error("herdr interactive mode requires pi to be running inside a herdr pane (HERDR_ENV=1 + HERDR_PANE_ID). Use background mode or run pi inside herdr.");
+    }
+
+    // 1. Split a new pane to the right of the parent, same cwd.
+    let paneId: string;
+    try {
+      const raw = execFileSync("herdr", [
+        "pane", "split",
+        "--pane", parentPane,
+        "--direction", "right",
+        "--cwd", cwd,
+      ], { encoding: "utf8" });
+      const parsed = JSON.parse(raw);
+      paneId = parsed?.result?.pane?.pane_id;
+      if (!paneId) throw new Error("herdr pane split returned no pane_id");
+    } catch (e: any) {
+      throw new Error(`herdr pane split failed: ${e?.message || e}`);
+    }
+
+    const resultFile = `/tmp/subagent-${id}-result.md`;
+
+    // 2. Start a pi agent in the new pane and pass the framed task as ARGV so
+    //    pi runs it immediately (no paste-buffer dance). `herdr agent start`
+    //    waits for interactive readiness before returning.
+    const framedTask = [
+      "IMPORTANT: You are running as a subagent. Do NOT spawn sub-subagents — do all the work yourself directly.",
+      "",
+      task,
+      "",
+      `When you have completed the task, do these two things:`,
+      `1. Use the write tool to save your complete findings/summary to ${resultFile}`,
+      `2. Then say "SUBAGENT COMPLETE" so I know you're done.`,
+    ].join("\n");
+
+    const agentName = `subagent-${id}`;
+    try {
+      execFileSync("herdr", [
+        "agent", "start", agentName,
+        "--kind", "pi",
+        "--pane", paneId,
+        "--", framedTask,
+      ], { stdio: "ignore" });
+    } catch (e: any) {
+      // Clean up the orphan pane we created so a failed start doesn't leak.
+      try { execFileSync("herdr", ["pane", "close", paneId], { stdio: "ignore" }); } catch {}
+      throw new Error(`herdr agent start failed: ${e?.message || e}`);
+    }
+
+    const run: TrackedRun = {
+      id,
+      task,
+      mode: "interactive",
+      startTime: Date.now(),
+      messages: [],
+      usage: emptyUsage(),
+      herdrPane: paneId,
+      resultFile,
+    };
+
+    const injectResult = async () => {
+      const elapsed = elapsedStr(run.startTime);
+      if (run.timeoutTimer) { clearTimeout(run.timeoutTimer); run.timeoutTimer = undefined; }
+      if (run.watcher) clearInterval(run.watcher);
+      active.delete(id);
+      updateWidget();
+
+      let content: string;
+      try {
+        const result = await readFile(resultFile, "utf8");
+        // Pane intentionally left open after clean completion so the user can
+        // steer / inspect. Tell them how to jump in.
+        content = `## Subagent \`${id}\` completed (${elapsed})\n\n${result}\n\n_Steer it: \`herdr agent attach ${paneId}\` — pane left open._`;
+      } catch {
+        // No result file → failure. Capture recent terminal output so the
+        // failure body has useful context (same idea as the background path's
+        // events.jsonl post-mortem).
+        let errMsg = "";
+        try {
+          errMsg = execFileSync("herdr",
+            ["agent", "read", paneId, "--source", "recent", "--lines", "20"],
+            { encoding: "utf8" }) || "";
+        } catch {}
+        content = `## Subagent \`${id}\` failed (${elapsed})\n\n${errMsg || "No output. Pane may have been closed or pi failed to start."}`;
+      }
+
+      pi.sendMessage(
+        { customType: "subagent-result", content, display: true },
+        { triggerTurn: true, deliverAs: "followUp" }
+      );
+    };
+
+    run.watcher = setInterval(async () => {
+      const alive = isHerdrPaneAlive(paneId);
+      let resultExists = false;
+      try { await access(resultFile); resultExists = true; } catch {}
+
+      if (resultExists) {
+        if (alive) {
+          // Give pi a moment to finish printing SUBAGENT COMPLETE before we inject.
+          setTimeout(() => injectResult(), 3000);
+          if (run.watcher) clearInterval(run.watcher);
+        } else {
+          injectResult();
+        }
+      } else if (!alive) {
+        // Pane died with no result file → pi crashed / was closed mid-task.
         injectResult();
       }
     }, 5000);
@@ -572,7 +797,7 @@ When you have completed the task, do these two things:
       "Use short descriptive IDs like 'cr-review', 'coverage', 'pipeline-check'",
       "Max 3-4 concurrent subagents to avoid rate limits",
       "Subagent results arrive as messages — you'll get a turn to incorporate them",
-      "Interactive mode spawns pi in a tmux window the user can switch to and steer, with results still auto-injecting when done",
+      "Interactive mode spawns pi in a steerable pane — in herdr (if pi runs inside it) or in a tmux window otherwise. Results still auto-inject when done.",
     ],
     parameters: Type.Object({
       id: Type.String({
@@ -586,7 +811,7 @@ When you have completed the task, do these two things:
       ),
       interactive: Type.Optional(
         Type.Boolean({
-          description: "If true, spawns a full pi session in a tmux window the user can switch to. Default: false (background pi -p).",
+          description: "If true, spawns a full interactive pi session the user can steer. Uses herdr when pi runs inside it (HERDR_ENV=1), else tmux. Default: false (background pi -p).",
         })
       ),
       timeout: Type.Optional(
@@ -608,18 +833,36 @@ When you have completed the task, do these two things:
       const timeoutMs = (timeout || 10) * 60_000;
 
       if (interactive) {
-        const run = spawnInteractive(id, task, cwd);
+        // Pick the backend by proximity: herdr when pi is running inside it,
+        // otherwise the original tmux path. Both share the resultFile watcher.
+        const inHerdr = process.env.HERDR_ENV === "1" && !!process.env.HERDR_PANE_ID;
+        if (!inHerdr) {
+          try {
+            execFileSync("tmux", ["-V"], { stdio: "ignore" });
+          } catch {
+            throw new Error(
+              "interactive mode needs herdr or tmux; retry with interactive:false for a background subagent."
+            );
+          }
+        }
+        const run = inHerdr
+          ? spawnInteractiveHerdr(id, task, cwd)
+          : spawnInteractiveTmux(id, task, cwd);
         run.timeoutMs = timeoutMs;
         run.timeoutTimer = setTimeout(() => killRun(run, "timeout"), timeoutMs);
         active.set(id, run);
         updateWidget();
 
+        const backend = run.tmuxSession ? "tmux window" : "herdr pane";
+        const attach = run.tmuxSession
+          ? `tmux select-window -t ${run.tmuxSession}`
+          : `herdr agent attach ${run.herdrPane}`;
         return {
           content: [{
             type: "text" as const,
-            text: `Subagent '${id}' spawned in tmux window. Switch to it:\n  tmux select-window -t ${run.tmuxSession}\nResults will auto-inject when complete.`,
+            text: `Subagent '${id}' spawned in ${backend}. Switch to it:\n  ${attach}\nResults will auto-inject when complete.`,
           }],
-          details: { id, mode: "interactive", tmuxSession: run.tmuxSession, cwd },
+          details: { id, mode: "interactive", tmuxSession: run.tmuxSession, herdrPane: run.herdrPane, cwd },
         };
       }
 
@@ -658,10 +901,16 @@ When you have completed the task, do these two things:
       const now = Date.now();
       const lines = Array.from(active.entries()).map(([id, run]) => {
         const elapsed = elapsedStr(run.startTime);
-        const mode = run.mode === "interactive" ? "tmux" : "bg";
+        const mode = run.mode === "interactive"
+          ? (run.herdrPane ? "herdr" : "tmux")
+          : "bg";
         const activity = run.lastToolCall ? ` — ${run.lastToolCall}` : "";
         const usage = run.usage.turns > 0 ? ` [${formatUsage(run.usage)}]` : "";
-        const attach = run.tmuxSession ? ` — \`tmux select-window -t ${run.tmuxSession}\`` : "";
+        const attach = run.tmuxSession
+          ? ` — \`tmux select-window -t ${run.tmuxSession}\``
+          : run.herdrPane
+          ? ` — \`herdr agent attach ${run.herdrPane}\``
+          : "";
         return `- **${id}** [${mode}] ${elapsed}${activity}${usage}${attach}`;
       });
 
@@ -705,6 +954,64 @@ When you have completed the task, do these two things:
         }],
         details: { id, killed: true },
       };
+    },
+  });
+
+  // ── /resume-subagent: recover crashed / killed / credits-dead subagents ──
+  // A clean background exit deletes its session file, so anything left in
+  // SUBAGENT_SESSION_DIR is by definition a run that didn't finish cleanly.
+  // This command lists those survivors and switches the current session into
+  // the chosen one (same mechanism as /handoff), so the parent agent picks up
+  // exactly where the dead subagent left off.
+  pi.registerCommand("resume-subagent", {
+    description: "Resume a crashed/killed subagent session, or purge saved crash files",
+    handler: async (args, ctx) => {
+      const arg = (args || "").trim();
+
+      if (arg === "purge") {
+        const files = listSubagentSessionFiles();
+        let n = 0;
+        for (const f of files) {
+          try { unlinkSync(f.file); n++; } catch {}
+        }
+        ctx.ui.notify(`Purged ${n} subagent crash file${n === 1 ? "" : "s"}.`, "info");
+        return;
+      }
+
+      if (arg === "list") {
+        const files = listSubagentSessionFiles();
+        if (files.length === 0) {
+          ctx.ui.notify("No crashed subagent sessions on disk.", "info");
+          return;
+        }
+        const lines = files.map((f) =>
+          `- ${f.file.replace(SUBAGENT_SESSION_DIR + "/", "")}  (${relativeTime(f.mtime)})`);
+        ctx.ui.notify(`Crashed subagent sessions:\n${lines.join("\n")}`, "info");
+        return;
+      }
+
+      const files = listSubagentSessionFiles();
+      if (files.length === 0) {
+        ctx.ui.notify("No crashed subagent sessions to resume (clean runs delete their own files).", "info");
+        return;
+      }
+
+      const options = files.map((f) => {
+        const name = f.file.replace(SUBAGENT_SESSION_DIR + "/", "");
+        return `${name}  (${relativeTime(f.mtime)})`;
+      });
+      const choice = await ctx.ui.select("Resume a crashed subagent session:", options);
+      if (!choice) return;
+
+      // choice is `<basename>  (<reltime>)`; recover the basename to build the full path.
+      const basename = choice.replace(/\s+\([^)]*\)\s*$/, "");
+      const fullPath = join(SUBAGENT_SESSION_DIR, basename);
+
+      await ctx.switchSession(fullPath, {
+        withSession: async (newCtx) => {
+          newCtx.ui.notify("Switched into crashed subagent session — continue from here.", "info");
+        },
+      });
     },
   });
 }

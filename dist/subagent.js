@@ -3,10 +3,13 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { spawn, execFileSync } from "node:child_process";
 import { readFile, unlink, access } from "node:fs/promises";
-import { existsSync, writeFileSync, createWriteStream } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, writeFileSync, createWriteStream, mkdirSync, unlinkSync, readdirSync, statSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 
 // src/subagent-diagnostics.ts
+import { homedir } from "node:os";
 var STDERR_TAIL_BYTES = 2e3;
 var MAX_ACTIVITY_LINE_CHARS = 256;
 var DEFAULT_MAX_ACTIVITY_EVENTS = 20;
@@ -24,39 +27,77 @@ function truncateTail(s, maxChars) {
   const keep = Math.max(0, maxChars - suffix.length);
   return s.slice(0, keep) + suffix;
 }
-function formatToolCallFull(event, maxLineChars = MAX_ACTIVITY_LINE_CHARS) {
-  const { name, arguments: args } = event;
-  const detail = formatToolDetail(name, args);
-  const line = `- ${name}: ${detail}`;
-  return truncateTail(line, maxLineChars);
+function collapsePath(p, home) {
+  return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
 }
-function formatToolDetail(name, args) {
+function formatToolCall(event, opts) {
+  const { name, arguments: args } = event;
+  const { maxLineChars, pathStyle, format = "trail" } = opts;
+  const home = homedir();
   const str = (v) => typeof v === "string" ? v : void 0;
+  const resolvePath = (v) => pathStyle === "collapsed" ? collapsePath(v, home) : v;
+  if (format === "widget") {
+    let label;
+    switch (name) {
+      case "bash": {
+        const cmd = str(args.command) ?? "...";
+        const trimmed = cmd.length > 50 ? cmd.slice(0, 50) + "\u2026" : cmd;
+        label = `$ ${trimmed}`;
+        break;
+      }
+      case "read":
+        label = `read ${resolvePath(str(args.file_path) ?? str(args.path) ?? "...")}`;
+        break;
+      case "write":
+        label = `write ${resolvePath(str(args.file_path) ?? str(args.path) ?? "...")}`;
+        break;
+      case "edit":
+        label = `edit ${resolvePath(str(args.file_path) ?? str(args.path) ?? "...")}`;
+        break;
+      default:
+        label = name;
+    }
+    return truncateTail(label, maxLineChars);
+  }
+  let detail;
   switch (name) {
     case "bash": {
       const cmd = str(args.command) ?? "";
-      return `$ ${cmd}`;
+      detail = `$ ${cmd}`;
+      break;
     }
     case "read":
     case "write":
     case "edit":
-      return str(args.file_path) ?? str(args.path) ?? "(no path)";
+      detail = resolvePath(str(args.file_path) ?? str(args.path) ?? "(no path)");
+      break;
     case "grep": {
       const pattern = str(args.pattern) ?? "(no pattern)";
-      const path = str(args.path) ?? ".";
-      return `${pattern} in ${path}`;
+      const path = resolvePath(str(args.path) ?? ".");
+      detail = `${pattern} in ${path}`;
+      break;
     }
     case "find":
-      return str(args.pattern) ?? str(args.path) ?? "(no pattern)";
+      detail = resolvePath(str(args.pattern) ?? str(args.path) ?? "(no pattern)");
+      break;
     case "ls":
-      return str(args.path) ?? ".";
+      detail = resolvePath(str(args.path) ?? ".");
+      break;
     default:
       try {
-        return JSON.stringify(args);
+        detail = JSON.stringify(args);
       } catch {
-        return "(unserializable args)";
+        detail = "(unserializable args)";
       }
   }
+  return truncateTail(`- ${name}: ${detail}`, maxLineChars);
+}
+function formatToolCallFull(event, maxLineChars = MAX_ACTIVITY_LINE_CHARS) {
+  return formatToolCall(event, {
+    maxLineChars,
+    pathStyle: "full",
+    format: "trail"
+  });
 }
 function buildActivityTrail(events, opts = {}) {
   if (events.length === 0) return "";
@@ -164,26 +205,6 @@ function getFinalText(messages) {
   }
   return "";
 }
-function shortenPath(p) {
-  const home = homedir();
-  return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
-}
-function formatToolCallShort(name, args) {
-  switch (name) {
-    case "bash": {
-      const cmd = args.command || "...";
-      return `$ ${cmd.length > 50 ? cmd.slice(0, 50) + "\u2026" : cmd}`;
-    }
-    case "read":
-      return `read ${shortenPath(args.file_path || args.path || "...")}`;
-    case "write":
-      return `write ${shortenPath(args.file_path || args.path || "...")}`;
-    case "edit":
-      return `edit ${shortenPath(args.file_path || args.path || "...")}`;
-    default:
-      return name;
-  }
-}
 function getPiInvocation(args) {
   const currentScript = process.argv[1];
   const isBunVirtual = currentScript?.startsWith("/$bunfs/root/");
@@ -199,6 +220,49 @@ function getPiInvocation(args) {
 function elapsedStr(start, end) {
   const s = ((end || Date.now()) - start) / 1e3;
   return s < 60 ? `${s.toFixed(0)}s` : `${(s / 60).toFixed(1)}m`;
+}
+var SUBAGENT_SESSION_DIR = join(homedir2(), ".pi", "agent", "subagent-sessions");
+function ensureSubagentSessionDir() {
+  if (!existsSync(SUBAGENT_SESSION_DIR)) {
+    mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true });
+  }
+}
+function stableSubagentSessionId(id) {
+  return `subagent-${id}-${randomBytes(4).toString("hex")}`;
+}
+function deleteSubagentSessionFile(sessionId) {
+  try {
+    for (const f of readdirSync(SUBAGENT_SESSION_DIR)) {
+      if (f.endsWith(`_${sessionId}.jsonl`)) {
+        unlinkSync(join(SUBAGENT_SESSION_DIR, f));
+      }
+    }
+  } catch {
+  }
+}
+function listSubagentSessionFiles() {
+  try {
+    const out = [];
+    for (const f of readdirSync(SUBAGENT_SESSION_DIR)) {
+      if (!f.endsWith(".jsonl")) continue;
+      const full = join(SUBAGENT_SESSION_DIR, f);
+      try {
+        out.push({ file: full, mtime: statSync(full).mtimeMs });
+      } catch {
+      }
+    }
+    out.sort((a, b) => b.mtime - a.mtime);
+    return out;
+  } catch {
+    return [];
+  }
+}
+function relativeTime(ms) {
+  const ago = Date.now() - ms;
+  if (ago < 6e4) return "just now";
+  if (ago < 36e5) return `${Math.floor(ago / 6e4)}m ago`;
+  if (ago < 864e5) return `${Math.floor(ago / 36e5)}h ago`;
+  return `${Math.floor(ago / 864e5)}d ago`;
 }
 function subagent_default(pi) {
   const active = /* @__PURE__ */ new Map();
@@ -243,6 +307,16 @@ function subagent_default(pi) {
       } catch {
       }
     }
+    if (run.mode === "interactive" && run.herdrPane) {
+      try {
+        execFileSync("herdr", ["agent", "send-keys", run.herdrPane, "esc", "C-c"], { stdio: "ignore" });
+      } catch {
+      }
+      try {
+        execFileSync("herdr", ["pane", "close", run.herdrPane], { stdio: "ignore" });
+      } catch {
+      }
+    }
     run.exitCode = reason === "timeout" ? 124 : 130;
     run.finishedAt = Date.now();
     const elapsed = elapsedStr(run.startTime, run.finishedAt);
@@ -274,7 +348,19 @@ The subagent was ${label}.`,
       "",
       task
     ].join("\n");
-    const piArgs = ["--mode", "json", "-p", "--no-session", framedTask];
+    const sessionId = stableSubagentSessionId(id);
+    run.subagentSessionId = sessionId;
+    ensureSubagentSessionDir();
+    const piArgs = [
+      "--mode",
+      "json",
+      "-p",
+      "--session-id",
+      sessionId,
+      "--session-dir",
+      SUBAGENT_SESSION_DIR,
+      framedTask
+    ];
     const invocation = getPiInvocation(piArgs);
     const proc = spawn(invocation.command, invocation.args, {
       cwd,
@@ -320,6 +406,9 @@ The subagent was ${label}.`,
       try {
         writeFileSync(resultPath, output || "(no output)");
       } catch {
+      }
+      if (!isError && run.subagentSessionId) {
+        deleteSubagentSessionFile(run.subagentSessionId);
       }
       const usageStr = formatUsage(run.usage, run.model);
       let content;
@@ -385,7 +474,7 @@ ${output}`;
       }
       if (event.type === "turn_end" && event.message) {
         const msg = event.message;
-        const hasToolCall = msg.content.some((p) => p.type === "toolCall");
+        const hasToolCall = Array.isArray(msg.content) && msg.content.some((p) => p.type === "toolCall");
         const errored = msg.stopReason === "error" || msg.stopReason === "aborted";
         if (!hasToolCall && !errored) {
           finishRun(0);
@@ -410,7 +499,10 @@ ${output}`;
           if (msg.errorMessage) run.errorMessage = msg.errorMessage;
           for (const part of msg.content) {
             if (part.type === "toolCall") {
-              run.lastToolCall = formatToolCallShort(part.name, part.arguments);
+              run.lastToolCall = formatToolCall(
+                { name: part.name, arguments: part.arguments },
+                { maxLineChars: 80, pathStyle: "collapsed", format: "widget" }
+              );
             }
           }
         }
@@ -445,7 +537,7 @@ ${output}`;
     proc.unref();
     return run;
   }
-  function isTargetAlive(target) {
+  function isTmuxTargetAlive(target) {
     try {
       execFileSync("tmux", ["display-message", "-t", target, "-p", ""], { stdio: "ignore" });
       return true;
@@ -453,7 +545,7 @@ ${output}`;
       return false;
     }
   }
-  function spawnInteractive(id, task, cwd) {
+  function spawnInteractiveTmux(id, task, cwd) {
     const tmuxName = `subagent-${id}`;
     const resultFile = `/tmp/subagent-${id}-result.md`;
     const promptFile = `/tmp/subagent-${id}-prompt.md`;
@@ -571,7 +663,135 @@ ${errMsg || "No output."}`;
       });
     };
     run.watcher = setInterval(async () => {
-      const alive = isTargetAlive(pasteTarget);
+      const alive = isTmuxTargetAlive(pasteTarget);
+      let resultExists = false;
+      try {
+        await access(resultFile);
+        resultExists = true;
+      } catch {
+      }
+      if (resultExists) {
+        if (alive) {
+          setTimeout(() => injectResult(), 3e3);
+          if (run.watcher) clearInterval(run.watcher);
+        } else {
+          injectResult();
+        }
+      } else if (!alive) {
+        injectResult();
+      }
+    }, 5e3);
+    return run;
+  }
+  function isHerdrPaneAlive(paneId) {
+    try {
+      execFileSync("herdr", ["pane", "get", paneId], { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function spawnInteractiveHerdr(id, task, cwd) {
+    const parentPane = process.env.HERDR_PANE_ID;
+    if (!parentPane || process.env.HERDR_ENV !== "1") {
+      throw new Error("herdr interactive mode requires pi to be running inside a herdr pane (HERDR_ENV=1 + HERDR_PANE_ID). Use background mode or run pi inside herdr.");
+    }
+    let paneId;
+    try {
+      const raw = execFileSync("herdr", [
+        "pane",
+        "split",
+        "--pane",
+        parentPane,
+        "--direction",
+        "right",
+        "--cwd",
+        cwd
+      ], { encoding: "utf8" });
+      const parsed = JSON.parse(raw);
+      paneId = parsed?.result?.pane?.pane_id;
+      if (!paneId) throw new Error("herdr pane split returned no pane_id");
+    } catch (e) {
+      throw new Error(`herdr pane split failed: ${e?.message || e}`);
+    }
+    const resultFile = `/tmp/subagent-${id}-result.md`;
+    const framedTask = [
+      "IMPORTANT: You are running as a subagent. Do NOT spawn sub-subagents \u2014 do all the work yourself directly.",
+      "",
+      task,
+      "",
+      `When you have completed the task, do these two things:`,
+      `1. Use the write tool to save your complete findings/summary to ${resultFile}`,
+      `2. Then say "SUBAGENT COMPLETE" so I know you're done.`
+    ].join("\n");
+    const agentName = `subagent-${id}`;
+    try {
+      execFileSync("herdr", [
+        "agent",
+        "start",
+        agentName,
+        "--kind",
+        "pi",
+        "--pane",
+        paneId,
+        "--",
+        framedTask
+      ], { stdio: "ignore" });
+    } catch (e) {
+      try {
+        execFileSync("herdr", ["pane", "close", paneId], { stdio: "ignore" });
+      } catch {
+      }
+      throw new Error(`herdr agent start failed: ${e?.message || e}`);
+    }
+    const run = {
+      id,
+      task,
+      mode: "interactive",
+      startTime: Date.now(),
+      messages: [],
+      usage: emptyUsage(),
+      herdrPane: paneId,
+      resultFile
+    };
+    const injectResult = async () => {
+      const elapsed = elapsedStr(run.startTime);
+      if (run.timeoutTimer) {
+        clearTimeout(run.timeoutTimer);
+        run.timeoutTimer = void 0;
+      }
+      if (run.watcher) clearInterval(run.watcher);
+      active.delete(id);
+      updateWidget();
+      let content;
+      try {
+        const result = await readFile(resultFile, "utf8");
+        content = `## Subagent \`${id}\` completed (${elapsed})
+
+${result}
+
+_Steer it: \`herdr agent attach ${paneId}\` \u2014 pane left open._`;
+      } catch {
+        let errMsg = "";
+        try {
+          errMsg = execFileSync(
+            "herdr",
+            ["agent", "read", paneId, "--source", "recent", "--lines", "20"],
+            { encoding: "utf8" }
+          ) || "";
+        } catch {
+        }
+        content = `## Subagent \`${id}\` failed (${elapsed})
+
+${errMsg || "No output. Pane may have been closed or pi failed to start."}`;
+      }
+      pi.sendMessage(
+        { customType: "subagent-result", content, display: true },
+        { triggerTurn: true, deliverAs: "followUp" }
+      );
+    };
+    run.watcher = setInterval(async () => {
+      const alive = isHerdrPaneAlive(paneId);
       let resultExists = false;
       try {
         await access(resultFile);
@@ -606,7 +826,7 @@ ${errMsg || "No output."}`;
     }
     widgetCtx = null;
   });
-  pi.on("agent_turn_start", async (_event, ctx) => {
+  pi.on("turn_start", async (_event, ctx) => {
     widgetCtx = ctx;
   });
   pi.registerTool({
@@ -620,7 +840,7 @@ ${errMsg || "No output."}`;
       "Use short descriptive IDs like 'cr-review', 'coverage', 'pipeline-check'",
       "Max 3-4 concurrent subagents to avoid rate limits",
       "Subagent results arrive as messages \u2014 you'll get a turn to incorporate them",
-      "Interactive mode spawns pi in a tmux window the user can switch to and steer, with results still auto-injecting when done"
+      "Interactive mode spawns pi in a steerable pane \u2014 in herdr (if pi runs inside it) or in a tmux window otherwise. Results still auto-inject when done."
     ],
     parameters: Type.Object({
       id: Type.String({
@@ -634,7 +854,7 @@ ${errMsg || "No output."}`;
       ),
       interactive: Type.Optional(
         Type.Boolean({
-          description: "If true, spawns a full pi session in a tmux window the user can switch to. Default: false (background pi -p)."
+          description: "If true, spawns a full interactive pi session the user can steer. Uses herdr when pi runs inside it (HERDR_ENV=1), else tmux. Default: false (background pi -p)."
         })
       ),
       timeout: Type.Optional(
@@ -652,19 +872,31 @@ ${errMsg || "No output."}`;
       }
       const timeoutMs = (timeout || 10) * 6e4;
       if (interactive) {
-        const run2 = spawnInteractive(id, task, cwd);
+        const inHerdr = process.env.HERDR_ENV === "1" && !!process.env.HERDR_PANE_ID;
+        if (!inHerdr) {
+          try {
+            execFileSync("tmux", ["-V"], { stdio: "ignore" });
+          } catch {
+            throw new Error(
+              "interactive mode needs herdr or tmux; retry with interactive:false for a background subagent."
+            );
+          }
+        }
+        const run2 = inHerdr ? spawnInteractiveHerdr(id, task, cwd) : spawnInteractiveTmux(id, task, cwd);
         run2.timeoutMs = timeoutMs;
         run2.timeoutTimer = setTimeout(() => killRun(run2, "timeout"), timeoutMs);
         active.set(id, run2);
         updateWidget();
+        const backend = run2.tmuxSession ? "tmux window" : "herdr pane";
+        const attach = run2.tmuxSession ? `tmux select-window -t ${run2.tmuxSession}` : `herdr agent attach ${run2.herdrPane}`;
         return {
           content: [{
             type: "text",
-            text: `Subagent '${id}' spawned in tmux window. Switch to it:
-  tmux select-window -t ${run2.tmuxSession}
+            text: `Subagent '${id}' spawned in ${backend}. Switch to it:
+  ${attach}
 Results will auto-inject when complete.`
           }],
-          details: { id, mode: "interactive", tmuxSession: run2.tmuxSession, cwd }
+          details: { id, mode: "interactive", tmuxSession: run2.tmuxSession, herdrPane: run2.herdrPane, cwd }
         };
       }
       const run = spawnBackground(id, task, cwd);
@@ -691,16 +923,16 @@ Results will auto-inject when complete.`
       if (active.size === 0) {
         return {
           content: [{ type: "text", text: "No subagents currently running." }],
-          details: {}
+          details: { count: 0, ids: [] }
         };
       }
       const now = Date.now();
       const lines = Array.from(active.entries()).map(([id, run]) => {
         const elapsed = elapsedStr(run.startTime);
-        const mode = run.mode === "interactive" ? "tmux" : "bg";
+        const mode = run.mode === "interactive" ? run.herdrPane ? "herdr" : "tmux" : "bg";
         const activity = run.lastToolCall ? ` \u2014 ${run.lastToolCall}` : "";
         const usage = run.usage.turns > 0 ? ` [${formatUsage(run.usage)}]` : "";
-        const attach = run.tmuxSession ? ` \u2014 \`tmux select-window -t ${run.tmuxSession}\`` : "";
+        const attach = run.tmuxSession ? ` \u2014 \`tmux select-window -t ${run.tmuxSession}\`` : run.herdrPane ? ` \u2014 \`herdr agent attach ${run.herdrPane}\`` : "";
         return `- **${id}** [${mode}] ${elapsed}${activity}${usage}${attach}`;
       });
       return {
@@ -740,6 +972,54 @@ ${lines.join("\n")}`
         }],
         details: { id, killed: true }
       };
+    }
+  });
+  pi.registerCommand("resume-subagent", {
+    description: "Resume a crashed/killed subagent session, or purge saved crash files",
+    handler: async (args, ctx) => {
+      const arg = (args || "").trim();
+      if (arg === "purge") {
+        const files2 = listSubagentSessionFiles();
+        let n = 0;
+        for (const f of files2) {
+          try {
+            unlinkSync(f.file);
+            n++;
+          } catch {
+          }
+        }
+        ctx.ui.notify(`Purged ${n} subagent crash file${n === 1 ? "" : "s"}.`, "info");
+        return;
+      }
+      if (arg === "list") {
+        const files2 = listSubagentSessionFiles();
+        if (files2.length === 0) {
+          ctx.ui.notify("No crashed subagent sessions on disk.", "info");
+          return;
+        }
+        const lines = files2.map((f) => `- ${f.file.replace(SUBAGENT_SESSION_DIR + "/", "")}  (${relativeTime(f.mtime)})`);
+        ctx.ui.notify(`Crashed subagent sessions:
+${lines.join("\n")}`, "info");
+        return;
+      }
+      const files = listSubagentSessionFiles();
+      if (files.length === 0) {
+        ctx.ui.notify("No crashed subagent sessions to resume (clean runs delete their own files).", "info");
+        return;
+      }
+      const options = files.map((f) => {
+        const name = f.file.replace(SUBAGENT_SESSION_DIR + "/", "");
+        return `${name}  (${relativeTime(f.mtime)})`;
+      });
+      const choice = await ctx.ui.select("Resume a crashed subagent session:", options);
+      if (!choice) return;
+      const basename = choice.replace(/\s+\([^)]*\)\s*$/, "");
+      const fullPath = join(SUBAGENT_SESSION_DIR, basename);
+      await ctx.switchSession(fullPath, {
+        withSession: async (newCtx) => {
+          newCtx.ui.notify("Switched into crashed subagent session \u2014 continue from here.", "info");
+        }
+      });
     }
   });
 }

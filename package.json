@@ -26,6 +26,7 @@
       "./dist/image-context-pruner.js",
       "./dist/markdown-viewer.js",
       "./dist/screenshot.js",
+      "./dist/subagent.js",
       "./dist/context-pruner.js",
       "./dist/daily-log.js"
     ]
