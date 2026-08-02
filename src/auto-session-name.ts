@@ -1,7 +1,9 @@
 /**
  * oh-pi Auto Session Name Extension
  *
- * Automatically names sessions based on the first user message.
+ * Automatically names sessions based on the first user message — as a short
+ * hyphenated keyword slug ("fix-login-page") rather than a truncated
+ * sentence, so session selectors and the auto-title tab stay readable.
  *
  * `PI_TAB_LABEL` env override: when set (by the subagent spawner for
  * interactive herdr/tmux subagents), the session is pre-named to that label
@@ -9,6 +11,18 @@
  * subagent prompt that arrives as the first user message.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { titleFromPrompt } from "./title-summary.js";
+
+/**
+ * The exact naming rule `agent_end` applies to the first user message:
+ * the shared prompt → title policy (slug, else truncated fallback).
+ * Exported so the session naming path is unit-testable without an
+ * ExtensionAPI — the tab (auto-title) and session (this) agree by
+ * construction, because both delegate to `titleFromPrompt`.
+ */
+export function nameFromFirstMessage(text: string): string {
+  return titleFromPrompt(text);
+}
 
 /**
  * Decide what name (if any) a fresh session should start with, under the
@@ -46,7 +60,7 @@ export default function (pi: ExtensionAPI) {
       ? userMsg.content
       : userMsg.content.filter((b) => b.type === "text").map((b) => (b as { text: string }).text).join(" ");
     if (!text) return;
-    const name = text.slice(0, 60).replace(/\n/g, " ").trim();
+    const name = nameFromFirstMessage(text);
     if (name) {
       pi.setSessionName(name);
       named = true;

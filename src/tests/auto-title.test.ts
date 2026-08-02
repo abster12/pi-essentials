@@ -27,10 +27,10 @@ describe("resolveTitleLabel", () => {
       );
     });
 
-    it("falls back to truncated first input when nothing else is set", () => {
+    it("summarizes the first input into a keyword slug", () => {
       assert.equal(
         resolveTitleLabel({ firstInput: "add a login page" }),
-        "add a login page",
+        "add-login-page",
       );
     });
 
@@ -41,27 +41,20 @@ describe("resolveTitleLabel", () => {
     });
   });
 
-  describe("first-input truncation", () => {
-    it("truncates with an ellipsis past the max", () => {
-      const long = "x".repeat(50);
-      const out = resolveTitleLabel({ firstInput: long, maxInput: 40 });
-      assert.equal(out, "x".repeat(40) + "…");
+  describe("first-input title", () => {
+    // Golden intent: the original complaint prompt must become a short
+    // hyphenated slug, not a truncated sentence.
+    it("turns the original long prompt into auto-naming-herdr-tab", () => {
+      const prompt = "we have auto naming of the herdr tab but that seems to be " +
+        "taking the whole prompt and then truncating it, what's the cheapest " +
+        "and easiest way we can summarise the prompt into hyphenated words";
+      assert.equal(resolveTitleLabel({ firstInput: prompt }), "auto-naming-herdr-tab");
     });
 
-    it("respects a custom maxInput", () => {
-      const out = resolveTitleLabel({ firstInput: "abcdefghij", maxInput: 5 });
-      assert.equal(out, "abcde…");
-    });
-
-    it("collapses newlines and runs of whitespace before measuring", () => {
-      assert.equal(
-        resolveTitleLabel({ firstInput: "hello\n\n  world   again" }),
-        "hello world again",
-      );
-    });
-
-    it("does not truncate input shorter than the max", () => {
-      assert.equal(resolveTitleLabel({ firstInput: "short", maxInput: 40 }), "short");
+    // Fallback policy (slug-empty cases) lives in titleFromPrompt; assert it
+    // once here to prove resolveTitleLabel hands through unchanged.
+    it("passes through stopword-only input untouched when short", () => {
+      assert.equal(resolveTitleLabel({ firstInput: "hi there" }), "hi there");
     });
   });
 

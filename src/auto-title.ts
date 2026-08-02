@@ -13,7 +13,7 @@
  * Refreshes the title on `agent_end` if `pi.getSessionName()` has been
  * updated (e.g. by `auto-session-name`, `/name`, or other extensions),
  * so the tab tracks the cleaned session name rather than staying on the
- * raw first-input truncation forever.
+ * raw first-input fallback forever.
  *
  * `PI_TAB_LABEL` env override: when set (typically by the subagent spawner
  * for interactive herdr/tmux subagents), the title is pinned to that label
@@ -22,6 +22,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { basename } from "node:path";
+import { titleFromPrompt } from "./title-summary.js";
 
 /**
  * Decide which terminal/tab label wins, given a pinned override (`PI_TAB_LABEL`),
@@ -31,7 +32,11 @@ import { basename } from "node:path";
  * Precedence — this is the rule the three event handlers collectively enforce:
  *   1. pinned label  — authoritative; subagent spawner knows the task.
  *   2. session name  — set by auto-session-name / `/name` / other extensions.
- *   3. first input   — truncated fallback for ordinary interactive sessions.
+ *   3. first input   — keyword slug ("fix-login-page") for ordinary
+ *                     interactive sessions, raw truncation as last resort.
+ *
+ * The slug + fallback policy lives in `titleFromPrompt` (title-summary.ts);
+ * this function only orders the precedence.
  *
  * Exported as a pure function so the precedence rule can be unit-tested without
  * a live ExtensionAPI / tmux / terminal.
@@ -40,14 +45,12 @@ export function resolveTitleLabel(opts: {
   pinnedLabel?: string;
   sessionName?: string;
   firstInput?: string;
-  maxInput?: number;
 }): string | undefined {
-  const { pinnedLabel, sessionName, firstInput, maxInput = 40 } = opts;
+  const { pinnedLabel, sessionName, firstInput } = opts;
   if (pinnedLabel) return pinnedLabel;
   if (sessionName) return sessionName;
   if (!firstInput?.trim()) return undefined;
-  const clean = firstInput.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
-  return clean.length > maxInput ? clean.slice(0, maxInput) + "…" : clean;
+  return titleFromPrompt(firstInput) || undefined;
 }
 
 /**

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { resolveInitialSessionName } from "../auto-session-name.js";
+import { resolveInitialSessionName, nameFromFirstMessage } from "../auto-session-name.js";
 
 /**
  * Tests for the session-name seeding rule applied on `session_start`.
@@ -36,5 +36,27 @@ describe("resolveInitialSessionName", () => {
     // calling, so an empty string never reaches this function in production.
     // It trusts its caller and returns the value verbatim — document that.
     assert.equal(resolveInitialSessionName({ pinnedLabel: "pinned" }), "pinned");
+  });
+});
+
+/**
+ * Tests for the agent_end naming rule: `nameFromFirstMessage` is exactly
+ * what the session path calls, so the session name and the auto-title tab
+ * label agree by construction — both delegate to `titleFromPrompt`.
+ */
+describe("nameFromFirstMessage", () => {
+  it("names a session with the same keyword slug the tab gets", () => {
+    const prompt = "we have auto naming of the herdr tab but that seems to be " +
+      "taking the whole prompt and then truncating it";
+    assert.equal(nameFromFirstMessage(prompt), "auto-naming-herdr-tab");
+  });
+
+  it("falls back to truncated text for stopword-only messages", () => {
+    const long = "the and of with to in ".repeat(8).trim();
+    assert.equal(nameFromFirstMessage(long), long.slice(0, 40) + "…");
+  });
+
+  it("returns empty string for empty messages (caller guards)", () => {
+    assert.equal(nameFromFirstMessage("   "), "");
   });
 });
