@@ -42,6 +42,7 @@ pi install -l .
 | **Context Pruner** | `context_prune` tool that lets the agent replace bulky search results with short summaries to free context space |
 | **Daily Log** | `daily_log` tool that appends timestamped entries to a daily markdown note (configurable via env vars) |
 | **Meat** | `/meat` command (run [meat](https://github.com/boldsoftware/meat), save to `.meat/latest.diff`, inject the reading diff), plus `meat_annotate` tool + `/meat-annotate` command that open the reading diff in the [Plannotator](https://github.com/backnotprop/plannotator) browser UI (via its official pi extension's shared event API) and return the user's verdict + annotations to the agent |
+| **Token Tracker** | `token_tracker` tool + `/tokens` command that aggregate LLM token usage and cost per model — pi's own usage parsed from session transcripts, plus the opencode CLI's ledger queried directly from its SQLite database |
 
 ## What's new in this fork
 
@@ -58,6 +59,7 @@ On top of the upstream extension set:
 - **Smarter compact header.** Resolves the *host* pi version by walking up from the running binary (the linked package can lag behind), and shows provider, model, thinking level, available prompts and skills.
 - **Precompiled build.** All extensions are bundled to `dist/*.js` with esbuild so pi loads them without per-startup jiti transpilation; `npm test` runs `tsc --noEmit` plus unit tests.
 - **Meat.** One extension for the meat reading-diff abridger: `/meat` runs it and injects the abridged diff into the conversation (full output saved to `.meat/latest.diff`), while `meat_annotate` / `/meat-annotate` run meat and open the reading diff in Plannotator's browser annotation UI over the shared `plannotator:request` event channel of the official `@plannotator/pi-extension`. Blocks until the user approves, annotates, or closes; the verdict and feedback come back to the agent as instructions. The opencode backend work in meat is orthogonal — this works with whatever model backend meat uses today.
+- **Token tracker.** `token_tracker` tool + `/tokens` command report per-model token usage and cost from two streams: pi's own session transcripts (`~/.pi/agent/sessions`, `subagent-sessions` — every assistant message carries provider/model/usage) and the opencode CLI's SQLite ledger (`~/.local/share/opencode/opencode.db`, the data behind `opencode stats`, queried via `node:sqlite`). Model variants merge; `--days N` and `--source pi|opencode|all` filter the report.
 
 ## Usage
 
@@ -88,6 +90,8 @@ The model can use these tools. You'll usually just ask it to spawn a subagent:
 - `context_prune {tool_use_id, summary}`: the agent replaces bulky tool results (search hits, long reads) with a short summary to free context.
 - `/meat [meat args]`: run the meat reading-diff abridger on the current repo (e.g. `/meat HEAD~3`, `/meat -staged`, `/meat -w`, `/meat -no-cache`, `/meat -model opencode/claude-sonnet-4-6`). Saves the full output to `.meat/latest.diff` and injects the abridged diff into the conversation for review. Default with no args is HEAD (not working-tree WIP); meat caches identical diffs under `~/.meat`.
 - `meat_annotate {revision?, staged?, working?, content?, title?, noCache?}`: runs `meat` to abridge a diff (latest commit by default; pass a sha/range, `staged`, or `working`), opens the reading diff in the Plannotator browser UI (Approve / Annotate / Close gate — input is blocked until then), and returns the verdict + feedback for the agent to act on. The review doc puts the whole meat reading-diff in one code fence so Plannotator shows it as monospace code with real line breaks; long lines soft-wrap at 100 cols with a `↳` continuation marker. Pass `content` to annotate existing text without running meat; `noCache: true` forces a fresh meat run. Honors abort and a UI timeout so a dead browser session cannot pin the agent turn forever.
+- `token_tracker {days?, source?}`: aggregate LLM token usage and cost per model. `days` limits the window to the last N days (default: all time); `source` is `pi` (parsed from session transcripts), `opencode` (queried from opencode's SQLite ledger), or `all` (both + a combined total). Answers "how many tokens / how much did we spend".
+- `/tokens [--days N] [--source pi|opencode|all]`: command form of `token_tracker`; injects the same report into the conversation.
 - `/meat-annotate [revision|range|-staged|-w|-no-cache]`: same flow as `meat_annotate`, driven from the prompt; the verdict is shown as a notification.
 - `daily_log {entry}`: appends a timestamped entry to today's note (see env vars below).
 - `/ss [prompt]`: grab the clipboard image and send it to the agent; `/ss <path> [prompt]` sends an image file.
@@ -106,11 +110,14 @@ The model can use these tools. You'll usually just ask it to spawn a subagent:
 | `MEAT_BIN` | `meat` | Path to the meat binary used by the meat extension |
 | `MEAT_ANNOTATE_TIMEOUT_MS` | `1200000` (20 min) | Timeout for the meat phase |
 | `MEAT_ANNOTATE_UI_TIMEOUT_MS` | `1800000` (30 min) | Timeout waiting on the Plannotator browser decision; abort also cancels |
+| `PI_AGENT_DIR` | `~/.pi/agent` | Where pi session transcripts live (sessions + subagent-sessions subdirs) for the token tracker |
+| `OPENCODE_DATA_DIR` | `~/.local/share/opencode` (or `$XDG_DATA_HOME/opencode`) | Where opencode keeps `opencode.db`, its usage ledger, for the token tracker |
 
 ## Requirements
 
 - pi 0.57+ (peer dependency)
 - **Meat.** Needs `meat` on PATH (`go install meat.dev/cmd/meat@latest`) with API keys for its model backend; the annotate flows additionally need the official Plannotator pi extension installed (`pi install npm:@plannotator/pi-extension`).
+- **Token Tracker.** The pi stream needs nothing extra (it reads pi's own session transcripts). The opencode stream needs the opencode CLI's ledger (`~/.local/share/opencode/opencode.db`, created by opencode 1.x) and Node ≥ 22.5 for `node:sqlite`.
 - **Herdr (preferred) or tmux.** Interactive subagents, `split_pane`, and herdr tab naming need one of these. Herdr wins when `HERDR_ENV=1` and `HERDR_PANE_ID` are set; otherwise tmux is used when available.
 - **Subagents.** Background mode works anywhere; `interactive: true` needs herdr or tmux.
 - **Split Pane.** Pi must be running inside herdr or tmux (it refuses to run otherwise, so the process stays visible).
