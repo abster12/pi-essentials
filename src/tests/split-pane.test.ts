@@ -2,9 +2,15 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildHerdrSplitArgs,
+  buildTmuxListPanesArgs,
   buildTmuxSplitArgs,
+  buildTmuxWindowQueryArgs,
+  findDedupPane,
   parseDirection,
+  parseHerdrPaneList,
   parseSplitPaneId,
+  parseTmuxPaneList,
+  parseWindowId,
   resolveMux,
   sanitizePaneName,
   validateSplitParams,
@@ -142,6 +148,122 @@ describe("parseSplitPaneId", () => {
   });
   it("throws on non-JSON output", () => {
     assert.throws(() => parseSplitPaneId("not json"), /non-JSON/);
+  });
+});
+
+// parseHerdrPaneList: `herdr pane list` JSON → the PaneInfo[] the dedup check
+// consumes. Agent panes are flagged (they're pi sessions, never command panes).
+// Malformed output throws — callers (backend.find) treat any throw as
+// "no dedup info" and split anyway, so this must not silently misparse.
+describe("parseHerdrPaneList", () => {
+  it("extracts pane id, label, tab id and agent-ness", () => {
+    const raw = JSON.stringify({
+      id: "cli:pane:list",
+      result: {
+        panes: [
+          { pane_id: "w1:pC", label: "expo", tab_id: "w1:t4" },
+          { pane_id: "w1:p5", label: "start-mobile-expo-server", tab_id: "w1:t4", agent: "pi" },
+          { pane_id: "w3:p1", label: "watcher" },
+        ],
+        type: "pane_list",
+      },
+    });
+    const panes = parseHerdrPaneList(raw);
+    assert.equal(panes.length, 3);
+    assert.deepEqual(panes[0], { paneId: "w1:pC", label: "expo", tabId: "w1:t4", isAgent: false });
+    assert.equal(panes[1].isAgent, true);
+    assert.equal(panes[2].tabId, undefined);
+  });
+  it("throws on non-JSON output", () => {
+    assert.throws(() => parseHerdrPaneList("not json"), /non-JSON/);
+  });
+  it("throws when the panes array is missing", () => {
+    assert.throws(() => parseHerdrPaneList('{"result":{}}'), /no panes array/);
+  });
+});
+
+// findDedupPane: the dedup decision itself. Same label in the parent's own
+// tab → reuse; anything else (other tab, agent pane, the parent itself, no
+// known parent tab) → undefined, i.e. split a fresh pane.
+describe("findDedupPane", () => {
+  const panes = [
+    { paneId: "w1:pC", label: "expo", tabId: "w1:t4", isAgent: false },
+    { paneId: "w1:pD", label: "expo", tabId: "w1:t5", isAgent: false },
+    { paneId: "w1:pE", label: "expo", tabId: "w1:t4", isAgent: true },
+    { paneId: "w1:pF", label: "api", tabId: "w1:t4", isAgent: false },
+    { paneId: "w1:pG", label: "watcher", tabId: "w1:t4", isAgent: false },
+  ];
+  it("matches the same label in the same tab", () => {
+    assert.equal(findDedupPane(panes, "w1:p1", "w1:t4", "expo")?.paneId, "w1:pC");
+  });
+  it("ignores same-label panes in other tabs", () => {
+    // Only w1:pD (other tab) carries "expo" with parent tab w1:t5.
+    assert.equal(findDedupPane(panes, "w1:p1", "w1:t5", "expo")?.paneId, "w1:pD");
+  });
+  it("never matches an agent (pi session) pane", () => {
+    // w1:pE is the only "expo" in t4 besides the real pane — exclude it and
+    // the only remaining candidate is an agent pane → no match.
+    const onlyAgent = [
+      { paneId: "w1:pE", label: "expo", tabId: "w1:t4", isAgent: true },
+    ];
+    assert.equal(findDedupPane(onlyAgent, "w1:p1", "w1:t4", "expo"), undefined);
+  });
+  it("never matches the parent pane itself", () => {
+    // w1:pG is both the parent and the only match → no self-reuse.
+    assert.equal(findDedupPane(panes, "w1:pG", "w1:t4", "watcher"), undefined);
+  });
+  it("returns undefined when the parent tab is unknown (don't guess)", () => {
+    assert.equal(findDedupPane(panes, "w1:p1", undefined, "expo"), undefined);
+  });
+  it("returns undefined when nothing matches", () => {
+    assert.equal(findDedupPane(panes, "w1:p1", "w1:t4", "storybook"), undefined);
+  });
+  it("matches labels exactly (case-sensitive, no prefix guessing)", () => {
+    assert.equal(findDedupPane(panes, "w1:p1", "w1:t4", "expo")?.paneId, "w1:pC");
+    assert.equal(findDedupPane(panes, "w1:p1", "w1:t4", "Exp"), undefined);
+    assert.equal(findDedupPane(panes, "w1:p1", "w1:t4", "exp"), undefined);
+  });
+});
+
+// tmux dedup plumbing: window query, pane listing, and line parsing. The
+// window id is tmux's "tab", so list results are tagged with it for the
+// same-tab scoping findDedupPane enforces.
+describe("buildTmuxWindowQueryArgs", () => {
+  it("asks display-message for the parent's window id", () => {
+    assert.deepEqual(buildTmuxWindowQueryArgs("%5"), ["display-message", "-p", "-t", "%5", "#{window_id}"]);
+  });
+});
+
+describe("parseWindowId", () => {
+  it("trims the window id", () => {
+    assert.equal(parseWindowId("@1\n"), "@1");
+  });
+  it("throws when the output is empty", () => {
+    assert.throws(() => parseWindowId("  \n"), /no window id/);
+  });
+});
+
+describe("buildTmuxListPanesArgs", () => {
+  it("lists panes of a window with pane id + title", () => {
+    assert.deepEqual(buildTmuxListPanesArgs("@1"), [
+      "list-panes", "-t", "@1", "-F", "#{pane_id}\t#{pane_title}",
+    ]);
+  });
+});
+
+describe("parseTmuxPaneList", () => {
+  it("parses id/title lines and tags the window id as the tab", () => {
+    const raw = "%1\tapi\n%2\t\n%3\tstorybook";
+    assert.deepEqual(parseTmuxPaneList(raw, "@1"), [
+      { paneId: "%1", label: "api", tabId: "@1", isAgent: false },
+      { paneId: "%2", label: "", tabId: "@1", isAgent: false },
+      { paneId: "%3", label: "storybook", tabId: "@1", isAgent: false },
+    ]);
+  });
+  it("skips blank lines and lines without a separator", () => {
+    const panes = parseTmuxPaneList("\n%1\tapi\nno-tab-line\n", "@1");
+    assert.equal(panes.length, 1);
+    assert.equal(panes[0].paneId, "%1");
   });
 });
 

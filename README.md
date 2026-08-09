@@ -52,7 +52,7 @@ On top of the upstream extension set:
 - **Interactive subagents.** `subagent` with `interactive: true` spawns a steerable pi session in its own pane via `herdr agent start` when inside herdr, otherwise a tmux window. Results still auto-inject when done. The pane/tab is named after the task.
 - **`subagent_kill` + timeouts.** Kill a subagent by ID or let it auto-kill after a timeout (`timeout` param, default 10 minutes).
 - **Failure diagnostics.** Crashed runs report exit code, signal, stderr, a trail of the tool calls it made, and partial output. Event logs are kept at `/tmp/subagent-<id>-events.jsonl` for post-mortem (`jq . < file`).
-- **`split_pane` tool.** Splits a named side pane (herdr preferred, tmux fallback) and runs any long-running command in its interactive shell: `./gradlew bootRun`, `flutter run`, `docker compose up`, `npm run dev`… The agent pane keeps focus; logs stream in the pane and Ctrl-C there stops the process.
+- **`split_pane` tool.** Splits a named side pane (herdr preferred, tmux fallback) and runs any long-running command in its interactive shell: `./gradlew bootRun`, `flutter run`, `docker compose up`, `npm run dev`… The agent pane keeps focus; logs stream in the pane and Ctrl-C there stops the process. Dedups by pane `name`: if a pane with the same name already exists in the current tab, it reuses that pane instead of splitting a duplicate (the model's context is lossy, so the tool checks the mux itself — pass `force: true` for a second instance).
 - **Slug-based tab/session names.** Auto-title and auto-session-name share one `titleFromPrompt` policy that turns a long first message into a 3-4 word hyphenated slug (`fix-login-page`) instead of truncating the sentence. Auto-title refreshes when the session gets a proper name (e.g. from auto-session-name or `/name`), and renames the herdr pane *and* its tab, or the tmux window/pane.
 - **`PI_TAB_LABEL` integration.** The subagent spawner sets `PI_TAB_LABEL` on interactive subagent panes so the tab and session show the task instead of the framed prompt; auto-title and auto-session-name honor it.
 - **Smarter compact header.** Resolves the *host* pi version by walking up from the running binary (the linked package can lag behind), and shows provider, model, thinking level, available prompts and skills.
@@ -81,7 +81,7 @@ The model can use these tools. You'll usually just ask it to spawn a subagent:
 
 ### Side panes (agent tool)
 
-- `split_pane {command, name, cwd?, direction?}`: run a long-running process in its own named side pane. `command` is the exact shell command (env vars, `&&`, pipes all work); `name` is the pane label shown in the tab strip (e.g. `api`, `storybook`, `watcher`); `direction` is `right` (default) or `down`. Ctrl-C in the pane stops the process.
+- `split_pane {command, name, cwd?, direction?, force?}`: run a long-running process in its own named side pane. `command` is the exact shell command (env vars, `&&`, pipes all work); `name` is the pane label shown in the tab strip (e.g. `api`, `storybook`, `watcher`); `direction` is `right` (default) or `down`. Ctrl-C in the pane stops the process. If a pane with the same `name` already exists in the current tab, the tool points you at it instead of splitting a duplicate (pass `force: true` to split a second instance anyway).
 
 ### Other tools and commands
 
