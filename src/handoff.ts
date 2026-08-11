@@ -236,7 +236,7 @@ async function resumeHandoff(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pr
   const framed =
     `Continuing work from a previous session. Handoff doc "${basename(selected.file)}" (saved ${relativeTime(selected.mtime)}):\n\n` +
     content +
-    `\n\nStart by orienting yourself — read the referenced session file if you need more detail than this doc — then continue the work.`;
+    `\n\nThis is context, not a directive to start working. Read the doc (and the referenced session file if you need more detail), then give the user a short summary of what this handoff covers and ask what they would like to do next.`;
   pi.sendUserMessage(framed, { deliverAs: "steer" });
   markConsumed(handoffDir(ctx.cwd), basename(selected.file));
   ctx.ui.notify(`Resumed handoff ${basename(selected.file)} — the agent now has full context.`, "info");
