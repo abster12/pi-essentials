@@ -44,11 +44,25 @@ pi install -l .
 | **Meat** | `/meat` command (run [meat](https://github.com/boldsoftware/meat), save to `.meat/latest.diff`, inject the reading diff), plus `meat_annotate` tool + `/meat-annotate` command that open the reading diff in the [Plannotator](https://github.com/backnotprop/plannotator) browser UI (via its official pi extension's shared event API) and return the user's verdict + annotations to the agent |
 | **Token Tracker** | `token_tracker` tool + `/tokens` command that aggregate LLM token usage and cost per model — pi's own usage parsed from session transcripts, plus the opencode CLI's ledger queried directly from its SQLite database |
 | **Handoff** | `/handoff <topic>` writes a session handoff doc (git state and session file auto-gathered, agent authors the summary); `/handoff` in a new session picks a doc and injects it as the first message — no manual "read the handoff" instruction |
+| **BTW** | `/btw` side-chat popover for quick tangential questions, with thread restore/reset and optional summary injection into the main chat |
+| **Files** | `/files` browser (also Ctrl+Shift+O) with git status and session file references, plus reveal/Quick Look/open/edit/diff-in-VS-Code actions; Ctrl+Shift+R Quick Looks the latest referenced file |
+| **Goal** | `/goal <objective>` long-running objective mode with automatic continuation and the `get_goal`, `create_goal`, `update_goal` tools; token/time budgets, session-log persistence |
+| **Unified Edit** | Replaces the built-in `edit` tool with a single text payload supporting marked row edit scripts (`[file]` headers, `@REPLACE`/`@INS.PRE`/`@INS.AFTER`/`@DEL`/`@APPEND`) and Codex-style `*** Begin/End Patch` patches, with preflight validation and live diff preview |
+| **No Sleep** | `/no-sleep` macOS `caffeinate` integration that prevents sleep while an agent turn or the whole session is active (`PI_NO_SLEEP`/`PI_NO_SLEEP_SCOPE`/`PI_NO_SLEEP_DISPLAY` env vars) |
+| **Split Fork** | `/split-fork [prompt]` branches the current session into a new pi process in a right-hand Ghostty split (macOS) |
+
+## Skills
+
+The package ships two agent skills (loaded on-demand from `skills/`):
+
+- **commit** — guidance for making concise Conventional Commits-style git commits with good subjects and bodies (read before any commit)
+- **frontend-design** — create distinctive, production-ready frontend UI with strong visual direction: typography, color, layout, motion systems, and a self-validation checklist
 
 ## What's new in this fork
 
 On top of the upstream extension set:
 
+- **Agent-stuff port.** `/btw`, `/files`, `/goal`, unified `edit`, `/no-sleep`, and `/split-fork` plus the `commit` and `frontend-design` skills are ported from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) and adapted to pi 0.83's API (the `goal` tool schema uses `Type.Union` literals instead of `StringEnum`, and the BTW resource loader implements 0.83's source-returning methods). Note that the **unified edit extension replaces pi's built-in `edit` tool** — remove `./dist/unified-edit.js` from `package.json` to keep the built-in.
 - **Herdr compatibility.** Interactive subagents, `split_pane`, and auto-title prefer [herdr](https://herdr.dev/) when pi is running inside it (`HERDR_ENV=1`). Upstream interactive subagents were tmux-only; this fork detects herdr first, drives `herdr pane` / `herdr agent` / `herdr tab`, and falls back to tmux when herdr isn't present.
 - **Durable subagents.** Background runs persist their transcript under `~/.pi/agent/subagent-sessions/`. On a clean finish the file is deleted; on a crash, kill, or API-credit death it survives and can be resumed with `/resume-subagent`. Runs stream JSON events for a live progress widget showing turns, token usage, cost, and model.
 - **Interactive subagents.** `subagent` with `interactive: true` spawns a steerable pi session in its own pane via `herdr agent start` when inside herdr, otherwise a tmux window. Results still auto-inject when done. The pane/tab is named after the task.
@@ -98,6 +112,12 @@ The model can use these tools. You'll usually just ask it to spawn a subagent:
 - `daily_log {entry}`: appends a timestamped entry to today's note (see env vars below).
 - `/ss [prompt]`: grab the clipboard image and send it to the agent; `/ss <path> [prompt]` sends an image file.
 - `/mdview [path]`: render a markdown file in the terminal; `/mermaid`: render mermaid from a file or stdin. Ctrl+O on a `.md` file while reading/editing shows the rendered preview.
+- `/btw [question]`: open a side-chat popover for quick tangential questions (Esc closes). `/btw` with an existing thread asks whether to continue it or start fresh; closing with a thread offers to inject a summary of it into the main chat. Threads persist in the session log.
+- `/files`: browse files with git status and session references — type to filter, Enter to pick, Ctrl+Shift+D to diff in VS Code, then reveal in Finder / open / Quick Look / edit in `$EDITOR` / add `@path` to the prompt. Ctrl+Shift+O is the same browser; Ctrl+Shift+R Quick Looks the latest file referenced in the session.
+- `/goal <objective>`: set a long-running objective. The agent auto-continues toward it across turns (usage/budget accounting in the status line), with `get_goal`/`create_goal`/`update_goal` tools for the model, and `/goal edit|pause|resume|clear` for you. Budgets and blocked/complete status flow through `/goal` messages.
+- `edit` (agent tool): accepts one `text` payload — a marked row script (`[path]` headers, `@REPLACE`/`@INS.PRE N`/`@INS.POST N`/`@INS.BEFORE`/`@INS.AFTER`/`@DEL N-M`/`@APPEND` with `+`/`-` rows) or a Codex-style `*** Begin Patch` … `*** End Patch` patch. Validates everything before touching files and shows a live diff preview in the tool header.
+- `/no-sleep [status|on|off|toggle|agent|session]`: prevent macOS sleep via `caffeinate` while the agent is running (default scope) or for the whole session. `PI_NO_SLEEP_DISPLAY=1` also keeps the display awake; the assertion dies with the pi process.
+- `/split-fork [prompt]`: fork the current session (committed state only) into a new pi process in a right-hand Ghostty split; the fork resumes from the same session branch.
 
 ### Configuration
 
@@ -125,6 +145,8 @@ The model can use these tools. You'll usually just ask it to spawn a subagent:
 - **Split Pane.** Pi must be running inside herdr or tmux (it refuses to run otherwise, so the process stays visible).
 - **Auto Title.** Works standalone for OSC title escape sequences; herdr naming needs `herdr` on PATH inside a herdr pane, tmux fallback needs `tmux`.
 - **Screenshots.** Kitty terminal with `clipboard_control read-clipboard`, tmux with `allow-passthrough on`, `~/.local/bin/kitten` on the remote.
+- **No Sleep.** macOS only (uses the built-in `caffeinate`).
+- **Split Fork.** macOS + [Ghostty](https://ghostty.org/) (drives it via AppleScript); the forked process runs `pi --session …` from the split's working directory.
 - **Mermaid rendering.** Internet access (uses the mermaid.ink API).
 
 ## Development

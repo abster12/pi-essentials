@@ -493,6 +493,17 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join } from "node:path";
+
+// src/relative-time.ts
+function relativeTime(ms) {
+  const ago = Date.now() - ms;
+  if (ago < 6e4) return "just now";
+  if (ago < 36e5) return `${Math.floor(ago / 6e4)}m ago`;
+  if (ago < 864e5) return `${Math.floor(ago / 36e5)}h ago`;
+  return `${Math.floor(ago / 864e5)}d ago`;
+}
+
+// src/subagent-sessions.ts
 var SUBAGENT_SESSION_DIR = join(homedir2(), ".pi", "agent", "subagent-sessions");
 function ensureSubagentSessionDir() {
   if (!existsSync(SUBAGENT_SESSION_DIR)) {
@@ -528,13 +539,6 @@ function listSubagentSessionFiles() {
   } catch {
     return [];
   }
-}
-function relativeTime(ms) {
-  const ago = Date.now() - ms;
-  if (ago < 6e4) return "just now";
-  if (ago < 36e5) return `${Math.floor(ago / 6e4)}m ago`;
-  if (ago < 864e5) return `${Math.floor(ago / 36e5)}h ago`;
-  return `${Math.floor(ago / 864e5)}d ago`;
 }
 
 // src/subagent.ts
