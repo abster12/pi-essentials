@@ -50,6 +50,7 @@ pi install -l .
 | **Unified Edit** | Replaces the built-in `edit` tool with a single text payload supporting marked row edit scripts (`[file]` headers, `@REPLACE`/`@INS.PRE`/`@INS.AFTER`/`@DEL`/`@APPEND`) and Codex-style `*** Begin/End Patch` patches, with preflight validation and live diff preview |
 | **No Sleep** | `/no-sleep` macOS `caffeinate` integration that prevents sleep while an agent turn or the whole session is active (`PI_NO_SLEEP`/`PI_NO_SLEEP_SCOPE`/`PI_NO_SLEEP_DISPLAY` env vars) |
 | **Split Fork** | `/split-fork [prompt]` branches the current session into a new pi process in a right-hand Ghostty split (macOS) |
+| **Whimsical** | Replaces the default thinking/status text with a random whimsical phrase while the agent works (`Combobulating...`, `Bribing the byte fairies...`) |
 
 ## Skills
 
