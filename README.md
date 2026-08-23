@@ -51,6 +51,7 @@ pi install -l .
 | **No Sleep** | `/no-sleep` macOS `caffeinate` integration that prevents sleep while an agent turn or the whole session is active (`PI_NO_SLEEP`/`PI_NO_SLEEP_SCOPE`/`PI_NO_SLEEP_DISPLAY` env vars) |
 | **Split Fork** | `/split-fork [prompt]` branches the current session into a new pi process in a right-hand Ghostty split (macOS) |
 | **Whimsical** | Replaces the default thinking/status text with a random whimsical phrase while the agent works (`Combobulating...`, `Bribing the byte fairies...`) |
+| **CD** | `/cd [dir]` changes the session working directory mid-chat (bash-style: bare `/cd` → home, `/cd -` → previous). Shell commands and file tools follow; the model is told via an appended reminder so the prompt cache stays intact |
 
 ## Skills
 
@@ -122,6 +123,7 @@ The model can use these tools. You'll usually just ask it to spawn a subagent:
 - `edit` (agent tool): accepts one `text` payload — a marked row script (`[path]` headers, `@REPLACE`/`@INS.PRE N`/`@INS.POST N`/`@INS.BEFORE`/`@INS.AFTER`/`@DEL N-M`/`@APPEND` with `+`/`-` rows) or a Codex-style `*** Begin Patch` … `*** End Patch` patch. Validates everything before touching files and shows a live diff preview in the tool header.
 - `/no-sleep [status|on|off|toggle|agent|session]`: prevent macOS sleep via `caffeinate` while the agent is running (default scope) or for the whole session. `PI_NO_SLEEP_DISPLAY=1` also keeps the display awake; the assertion dies with the pi process.
 - `/split-fork [prompt]`: fork the current session (committed state only) into a new pi process in a right-hand Ghostty split; the fork resumes from the same session branch.
+- `/cd [dir]`: change the session working directory without restarting. Bare `/cd` goes home, `/cd -` goes back, `~` expands. Tab completes directories from the current session dir (dirs only; hidden ones only if you type `.`). Bash commands run in the new folder; relative paths on read/edit/write/grep/find/ls are rewritten to match. The system prompt is left alone (changing it would bust the prompt cache) — a hidden reminder is appended instead so the model knows.
 
 ### Configuration
 
