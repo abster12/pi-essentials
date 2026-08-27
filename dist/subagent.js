@@ -560,6 +560,28 @@ function formatUsage(u, model) {
   if (model) p.push(model);
   return p.join(" ");
 }
+function usageFromPayload(u) {
+  if (!u || typeof u !== "object") return;
+  return {
+    input: u.input || 0,
+    output: u.output || 0,
+    cacheRead: u.cacheRead || 0,
+    cacheWrite: u.cacheWrite || 0,
+    cost: u.cost?.total || 0,
+    turns: 0
+  };
+}
+function displayUsage(committed, live) {
+  if (!live) return committed;
+  return {
+    input: committed.input + live.input,
+    output: committed.output + live.output,
+    cacheRead: committed.cacheRead + live.cacheRead,
+    cacheWrite: committed.cacheWrite + live.cacheWrite,
+    cost: committed.cost + live.cost,
+    turns: committed.turns
+  };
+}
 function getFinalText(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -599,23 +621,39 @@ function frameBackgroundTask(task) {
 function subagent_default(pi) {
   const active = /* @__PURE__ */ new Map();
   let widgetCtx = null;
+  let widgetTick;
+  function stopWidgetTick() {
+    if (!widgetTick) return;
+    clearInterval(widgetTick);
+    widgetTick = void 0;
+  }
   function updateWidget() {
-    if (!widgetCtx) return;
-    const running = [...active.values()].filter((r) => r.exitCode === void 0);
-    if (running.length === 0) {
-      widgetCtx.ui.setWidget("subagent-status", void 0);
-      return;
-    }
-    widgetCtx.ui.setWidget("subagent-status", (_tui, theme) => {
-      const lines = running.map((r) => {
-        const elapsed = elapsedStr(r.startTime);
-        const icon = r.mode === "interactive" ? "\u{1F5A5}" : "\u23F3";
-        const activity = r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : theme.fg("dim", " starting\u2026");
-        const usage = r.usage.turns > 0 ? theme.fg("muted", ` [${formatUsage(r.usage)}]`) : "";
-        return `${icon} ${theme.fg("accent", r.id)} ${theme.fg("dim", elapsed)}${activity}${usage}`;
+    try {
+      const running = [...active.values()].filter((r) => r.exitCode === void 0);
+      if (running.length === 0) {
+        stopWidgetTick();
+        widgetCtx?.ui.setWidget("subagent-status", void 0);
+        return;
+      }
+      if (!widgetCtx) return;
+      if (!widgetTick) {
+        widgetTick = setInterval(updateWidget, 1e3);
+        widgetTick.unref?.();
+      }
+      widgetCtx.ui.setWidget("subagent-status", (_tui, theme) => {
+        const lines = running.map((r) => {
+          const elapsed = elapsedStr(r.startTime);
+          const icon = r.mode === "interactive" ? "\u{1F5A5}" : "\u23F3";
+          const activity = r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : theme.fg("dim", " starting\u2026");
+          const u = displayUsage(r.usage, r.liveUsage);
+          const usageStr = formatUsage(u, r.model);
+          const usage = usageStr ? theme.fg("muted", ` [${usageStr}]`) : "";
+          return `${icon} ${theme.fg("accent", r.id)} ${theme.fg("dim", elapsed)}${activity}${usage}`;
+        });
+        return new Text(lines.join("\n"), 0, 0);
       });
-      return new Text(lines.join("\n"), 0, 0);
-    });
+    } catch {
+    }
   }
   function killRun(run, reason) {
     if (run.timeoutTimer) clearTimeout(run.timeoutTimer);
@@ -794,9 +832,27 @@ ${output}`;
           return;
         }
       }
+      if (event.type === "message_start" && event.message?.role === "assistant") {
+        if (event.message.model) run.model = event.message.model;
+        return;
+      }
+      if (event.type === "message_update") {
+        const live = usageFromPayload(event.usage);
+        if (live) run.liveUsage = live;
+        const ev = event.assistantMessageEvent;
+        if (ev?.type === "thinking_start" && !run.lastToolCall) {
+          run.lastToolCall = "thinking\u2026";
+          updateWidget();
+        } else if (ev?.type === "toolcall_start" && ev.toolName) {
+          run.lastToolCall = ev.toolName;
+          updateWidget();
+        }
+        return;
+      }
       if (event.type === "message_end" && event.message) {
         const msg = event.message;
         run.messages.push(msg);
+        run.liveUsage = void 0;
         if (msg.role === "assistant") {
           run.usage.turns++;
           const u = msg.usage;
@@ -821,8 +877,11 @@ ${output}`;
         }
         updateWidget();
       }
-      if (event.type === "tool_result_end" && event.message) {
-        run.messages.push(event.message);
+      if (event.type === "tool_execution_start") {
+        run.lastToolCall = formatToolCall(
+          { name: event.toolName, arguments: event.args || {} },
+          { maxLineChars: 80, pathStyle: "collapsed", format: "widget" }
+        );
         updateWidget();
       }
     };
@@ -962,16 +1021,23 @@ ${output}`;
       if (entry.timeoutTimer) clearTimeout(entry.timeoutTimer);
     }
     active.clear();
+    stopWidgetTick();
+    try {
+      widgetCtx.ui.setWidget("subagent-status", void 0);
+    } catch {
+    }
   });
   pi.on("session_shutdown", async () => {
     for (const [, entry] of active) {
       if (entry.watcher) clearInterval(entry.watcher);
       if (entry.timeoutTimer) clearTimeout(entry.timeoutTimer);
     }
+    stopWidgetTick();
     widgetCtx = null;
   });
   pi.on("turn_start", async (_event, ctx) => {
     widgetCtx = ctx;
+    updateWidget();
   });
   pi.registerTool({
     name: "subagent",
