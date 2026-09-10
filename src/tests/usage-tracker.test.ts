@@ -6,6 +6,7 @@ import {
   formatReport,
   hottest,
   parseOpencodeUsage,
+  parseOpenAICodexUsage,
   parseXaiBilling,
   parseXaiTier,
   remaining,
@@ -108,6 +109,51 @@ describe("parseXaiTier", () => {
   });
 });
 
+describe("parseOpenAICodexUsage", () => {
+  const sample = {
+    plan_type: "plus",
+    rate_limit: {
+      primary_window: {
+        used_percent: 48,
+        limit_window_seconds: 18_000,
+        reset_at: 1_787_866_019,
+      },
+      secondary_window: {
+        used_percent: 7,
+        limit_window_seconds: 604_800,
+        reset_at: 1_788_452_819,
+      },
+    },
+  };
+  it("reads 5h and weekly percents", () => {
+    const w = parseOpenAICodexUsage(sample);
+    assert.deepEqual(
+      w.map((x) => [x.name, x.text ?? x.percent, x.resetsAt]),
+      [
+        ["plan", "plus", undefined],
+        ["5h", 48, new Date(1_787_866_019 * 1000).toISOString()],
+        ["weekly", 7, new Date(1_788_452_819 * 1000).toISOString()],
+      ],
+    );
+  });
+  it("names other window lengths by duration", () => {
+    const w = parseOpenAICodexUsage({
+      rate_limit: {
+        primary_window: { used_percent: 10, limit_window_seconds: 10_800 },
+        secondary_window: { used_percent: 20, limit_window_seconds: 172_800 },
+      },
+    });
+    assert.deepEqual(
+      w.map((x) => x.name),
+      ["3h", "2d"],
+    );
+  });
+  it("rejects junk", () => {
+    assert.throws(() => parseOpenAICodexUsage({}), /no usage windows/);
+    assert.throws(() => parseOpenAICodexUsage(null), /bad usage/);
+  });
+});
+
 describe("hottest / remaining / bar", () => {
   it("picks the highest used %", () => {
     const w = parseOpencodeUsage(sample);
@@ -145,6 +191,22 @@ describe("formatFooter / formatReport", () => {
   ];
   it("footer is provider-hottest window with %", () => {
     assert.equal(formatFooter(rows), "go-weekly 40%");
+  });
+  it("openai-codex footer shows 5h and weekly", () => {
+    const oai: ProviderRow = {
+      id: "openai-codex",
+      short: "oai",
+      name: "OpenAI Codex",
+      kind: "ok",
+      windows: parseOpenAICodexUsage({
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: { used_percent: 48, limit_window_seconds: 18_000 },
+          secondary_window: { used_percent: 7, limit_window_seconds: 604_800 },
+        },
+      }),
+    };
+    assert.equal(formatFooter([...rows, oai]), "go-weekly 40% · oai-5h 48% · oai-weekly 7%");
   });
   it("report has used, left, and reset", () => {
     const now = Date.parse("2026-08-17T12:00:00.000Z");

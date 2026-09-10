@@ -1,7 +1,7 @@
 {
   "name": "@samfp/pi-essentials",
   "version": "0.2.3",
-  "description": "Essential extensions for pi — auto session naming, compact header, clipboard images, image pruning, markdown viewer, screenshots, and subagents.",
+  "description": "Essential extensions for pi — auto session naming, compact header, clipboard images, image pruning, markdown viewer, screenshots, and split panes.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -27,7 +27,6 @@
       "./dist/image-context-pruner.js",
       "./dist/markdown-viewer.js",
       "./dist/screenshot.js",
-      "./dist/subagent.js",
       "./dist/context-pruner.js",
       "./dist/daily-log.js",
       "./dist/split-pane.js",
@@ -40,15 +39,14 @@
       "./dist/goal.js",
       "./dist/no-sleep.js",
       "./dist/split-fork.js",
-      "./dist/whimsical.js",
-      "./dist/cd.js"
+      "./dist/whimsical.js"
     ]
   },
   "scripts": {
     "test": "npm run check && node --test --import tsx src/tests/*.test.ts",
-    "build": "esbuild src/auto-session-name.ts src/auto-title.ts src/compact-header.ts src/clipboard-image.ts src/image-context-pruner.ts src/markdown-viewer.ts src/screenshot.ts src/subagent.ts src/context-pruner.ts src/daily-log.ts src/split-pane.ts src/meat.ts src/token-tracker.ts src/usage-tracker.ts src/handoff.ts src/btw.ts src/files.ts src/goal.ts src/no-sleep.ts src/split-fork.ts src/whimsical.ts src/cd.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --packages=external --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui --external:@earendil-works/pi-ai --external:@sinclair/typebox",
+    "build": "esbuild src/auto-session-name.ts src/auto-title.ts src/compact-header.ts src/clipboard-image.ts src/image-context-pruner.ts src/markdown-viewer.ts src/screenshot.ts src/context-pruner.ts src/daily-log.ts src/split-pane.ts src/meat.ts src/token-tracker.ts src/usage-tracker.ts src/handoff.ts src/btw.ts src/files.ts src/goal.ts src/no-sleep.ts src/split-fork.ts src/whimsical.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --packages=external --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui --external:@earendil-works/pi-ai --external:@sinclair/typebox",
     "check": "tsc --noEmit",
-    "dev": "esbuild src/auto-session-name.ts src/auto-title.ts src/compact-header.ts src/clipboard-image.ts src/image-context-pruner.ts src/markdown-viewer.ts src/screenshot.ts src/subagent.ts src/context-pruner.ts src/daily-log.ts src/split-pane.ts src/meat.ts src/token-tracker.ts src/usage-tracker.ts src/handoff.ts src/btw.ts src/files.ts src/goal.ts src/no-sleep.ts src/split-fork.ts src/whimsical.ts src/cd.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --watch --packages=external --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui --external:@earendil-works/pi-ai --external:@sinclair/typebox",
+    "dev": "esbuild src/auto-session-name.ts src/auto-title.ts src/compact-header.ts src/clipboard-image.ts src/image-context-pruner.ts src/markdown-viewer.ts src/screenshot.ts src/context-pruner.ts src/daily-log.ts src/split-pane.ts src/meat.ts src/token-tracker.ts src/usage-tracker.ts src/handoff.ts src/btw.ts src/files.ts src/goal.ts src/no-sleep.ts src/split-fork.ts src/whimsical.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --watch --packages=external --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui --external:@earendil-works/pi-ai --external:@sinclair/typebox",
     "prepare": "npm run build"
   },
   "devDependencies": {

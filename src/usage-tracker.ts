@@ -2,8 +2,9 @@
  * usage_tracker — remaining subscription quota for providers linked in pi.
  *
  * OpenCode Go: GET /zen/go/v1/usage. xAI: grok CLI billing proxy
- * (plan + monthly/on-demand). Cursor has no remaining-quota API.
- * `/usage` prints a report (not sent to the model). Footer shows `go-weekly 40% · xai SuperGrok`.
+ * (plan + monthly/on-demand). OpenAI Codex: GET /wham/usage (5h + weekly).
+ * Cursor has no remaining-quota API.
+ * `/usage` prints a report (not sent to the model). Footer shows `go-weekly 40% · xai SuperGrok · oai-5h 48% · oai-weekly 7%`.
  * `/tokens` is spend; this is remaining allowance.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -37,6 +38,9 @@ const OPENCODE_GO_USAGE = "https://opencode.ai/zen/go/v1/usage";
 // ponytail: grok CLI proxy, official remaining-quota API if xAI publishes one
 const XAI_BILLING = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const XAI_SETTINGS = "https://cli-chat-proxy.grok.com/v1/settings";
+// ponytail: chatgpt.com/wham/usage, official remaining-quota API if OpenAI publishes one
+const OPENAI_CODEX_USAGE = "https://chatgpt.com/backend-api/wham/usage";
+const OPENAI_AUTH_CLAIM = "https://api.openai.com/auth";
 const CACHE_MS = 60_000;
 const WARN_AT = 80;
 
@@ -45,6 +49,7 @@ export const PROVIDERS: ProviderDef[] = [
   { id: "opencode", short: "zen", name: "OpenCode Zen" },
   { id: "cursor", short: "cursor", name: "Cursor" },
   { id: "xai", short: "xai", name: "xAI", fetch: fetchXai },
+  { id: "openai-codex", short: "oai", name: "OpenAI Codex", fetch: fetchOpenAICodex },
 ];
 
 export function parseOpencodeUsage(json: unknown): QuotaWindow[] {
@@ -154,6 +159,74 @@ async function fetchXai(apiKey: string, signal?: AbortSignal): Promise<QuotaWind
   return parseXaiBilling(await billing.json(), tier);
 }
 
+function durationName(seconds: number): string {
+  if (seconds === 18_000) return "5h";
+  if (seconds === 604_800) return "weekly";
+  if (seconds >= 86_400) return `${Math.round(seconds / 86_400)}d`;
+  if (seconds >= 3_600) return `${Math.round(seconds / 3_600)}h`;
+  return `${Math.round(seconds)}s`;
+}
+
+function unixIso(v: unknown): string | undefined {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return new Date(n > 1e12 ? n : n * 1000).toISOString();
+}
+
+function parseCodexWindow(rec: unknown, fallback: string): QuotaWindow | undefined {
+  if (!rec || typeof rec !== "object") return undefined;
+  const row = rec as Record<string, unknown>;
+  const percent = Number(row.used_percent);
+  if (!Number.isFinite(percent)) return undefined;
+  const seconds = Number(row.limit_window_seconds);
+  return {
+    name: Number.isFinite(seconds) && seconds > 0 ? durationName(seconds) : fallback,
+    percent,
+    status: "ok",
+    resetsAt: unixIso(row.reset_at),
+  };
+}
+
+export function parseOpenAICodexUsage(json: unknown): QuotaWindow[] {
+  if (!json || typeof json !== "object") throw new Error("bad usage payload");
+  const rec = json as Record<string, unknown>;
+  const out: QuotaWindow[] = [];
+  if (typeof rec.plan_type === "string" && rec.plan_type.trim()) {
+    out.push({ name: "plan", percent: 0, status: "ok", text: rec.plan_type.trim() });
+  }
+  const rate = rec.rate_limit && typeof rec.rate_limit === "object" ? (rec.rate_limit as Record<string, unknown>) : undefined;
+  const primary = parseCodexWindow(rate?.primary_window, "primary");
+  const secondary = parseCodexWindow(rate?.secondary_window, "secondary");
+  if (primary) out.push(primary);
+  if (secondary) out.push(secondary);
+  if (out.length === 0) throw new Error("no usage windows");
+  return out;
+}
+
+function accountIdFromToken(token: string): string {
+  const payload = token.split(".")[1];
+  if (!payload) throw new Error("no account id");
+  const json = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, unknown>;
+  const auth = json[OPENAI_AUTH_CLAIM];
+  const id = auth && typeof auth === "object" ? (auth as { chatgpt_account_id?: unknown }).chatgpt_account_id : undefined;
+  if (typeof id !== "string" || !id) throw new Error("no account id");
+  return id;
+}
+
+async function fetchOpenAICodex(apiKey: string, signal?: AbortSignal): Promise<QuotaWindow[]> {
+  const res = await fetch(OPENAI_CODEX_USAGE, {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "chatgpt-account-id": accountIdFromToken(apiKey),
+      Accept: "application/json",
+      originator: "pi",
+    },
+    signal,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return parseOpenAICodexUsage(await res.json());
+}
+
 /** Hottest window = highest used %. */
 export function hottest(windows: QuotaWindow[]): QuotaWindow {
   return windows.reduce((a, b) => (b.percent > a.percent ? b : a));
@@ -183,8 +256,9 @@ export function formatFooter(rows: ProviderRow[]): string {
       if (r.kind !== "ok") return [];
       const metered = r.windows.filter((w) => !w.text);
       if (metered.length > 0) {
-        const w = hottest(metered);
-        return [`${r.short}-${w.name} ${Math.round(w.percent)}%`];
+        // 5h and weekly are independent limits — both belong in the footer
+        const shown = r.id === "openai-codex" ? metered : [hottest(metered)];
+        return shown.map((w) => `${r.short}-${w.name} ${Math.round(w.percent)}%`);
       }
       const text = r.windows[0]?.text;
       return [text ? `${r.short} ${text}` : r.short];

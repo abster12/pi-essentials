@@ -9,7 +9,7 @@
  * focus (the split itself is non-focus-stealing; the user switches panes
  * manually — no focus hints by design).
  *
- * Backends, mirroring auto-title / subagent:
+ * Backends, mirroring auto-title:
  *   - herdr (preferred): `herdr pane split --direction right --no-focus` then
  *     `herdr pane rename` + `herdr pane send-text` + `herdr pane send-keys Enter`.
  *   - tmux (fallback):   `tmux split-window -h -d` (= side-by-side, same tab)
@@ -23,16 +23,16 @@
  * guarantee a shell, so `PORT=8000 ./gradlew bootRun && tail -f build.log` or
  * pipes would break. send-text + Enter feeds the literal string to the new
  * pane's interactive shell, which parses it with full shell semantics — the
- * same pattern subagent's tmux path already relies on. tty input is buffered,
+ * tty input is buffered,
  * so type-ahead survives the brief moment before the shell prints its prompt.
  *
  * Dedup — the model's context is lossy (pruning, new sessions, closed panes),
  * so it cannot be trusted to remember which panes exist: the tool itself
  * queries the mux before splitting. If a non-agent pane in the parent's tab
- * already carries the requested `name`, split_pane reuses it (returns a pointer
- * + hint) instead of splitting a duplicate. `force: true` bypasses the check
- * for legit second instances (e.g. two servers on different ports). Dedup is
- * best-effort: a failed `pane list` never fails the tool — it just splits.
+ * already carries the requested `name`, split_pane reuses it: idle → run the
+ * command there; a foreground process → leave it. `force: true` bypasses the
+ * check for legit second instances (e.g. two servers on different ports).
+ * Dedup is best-effort: a failed `pane list` never fails the tool — it just splits.
  *
  * "A process should keep running" is the model's job, not an event: the
  * tool's description + promptGuidelines tell it to use `split_pane` for any
@@ -63,9 +63,12 @@ export type MuxBackend = {
   rename(paneId: string, label: string): void;
   /** Run the command in the new pane's interactive shell. Throws → leave the pane open. */
   run(paneId: string, command: string): void;
-  /** Best-effort dedup: find an existing non-agent pane in the parent's tab
-   *  with the same label. Never throws — undefined means "split anew". */
-  find(label: string): PaneInfo | undefined;
+  /** Best-effort dedup: same-label non-agent panes in the parent's tab.
+   *  Never throws — empty means "split anew". */
+  find(label: string): PaneInfo[];
+  /** true = at a shell prompt (safe to type), false = a foreground job,
+   *  undefined = couldn't tell. Never throws. */
+  idle(paneId: string): boolean | undefined;
   /** Human hint for how to stop the process (used in the tool reply). */
   stopHint(paneId: string): string;
 };
@@ -231,19 +234,69 @@ export function parseTmuxPaneList(raw: string, windowId: string): PaneInfo[] {
   return panes;
 }
 
-/** The dedup core: would `label` already be "running" as a command pane?
- *  Matches only non-agent panes in the parent's own tab; the parent pane
- *  itself never counts; an unknown parent tab means "don't guess" → no match. */
-export function findDedupPane(
+/** Same-label non-agent command panes in the parent's own tab.
+ *  The parent pane itself never counts; an unknown parent tab means
+ *  "don't guess" → []. */
+export function findDedupPanes(
   panes: PaneInfo[],
   parentPaneId: string,
   parentTabId: string | undefined,
   label: string,
-): PaneInfo | undefined {
-  if (!parentTabId) return undefined;
-  return panes.find(
+): PaneInfo[] {
+  if (!parentTabId) return [];
+  return panes.filter(
     (p) => p.paneId !== parentPaneId && !p.isAgent && p.tabId === parentTabId && p.label === label,
   );
+}
+
+/** Reuse policy: a busy same-named pane wins (leave it). Else run in the first. */
+export function pickReuseTarget(
+  panes: PaneInfo[],
+  idleOf: (paneId: string) => boolean | undefined,
+): { pane: PaneInfo; run: boolean } | undefined {
+  if (panes.length === 0) return undefined;
+  for (const pane of panes) {
+    if (idleOf(pane.paneId) === false) return { pane, run: false };
+  }
+  return { pane: panes[0], run: true };
+}
+
+/** argv for `herdr pane process-info`. */
+export function buildHerdrProcessInfoArgs(paneId: string): string[] {
+  return ["pane", "process-info", "--pane", paneId];
+}
+
+/** Idle iff the foreground process group is the shell itself. */
+export function parseHerdrProcessIdle(raw: string): boolean {
+  let parsed: { result?: { process_info?: { shell_pid?: unknown; foreground_process_group_id?: unknown } } };
+  try {
+    parsed = JSON.parse(raw) as typeof parsed;
+  } catch {
+    throw new Error(`herdr pane process-info returned non-JSON output: ${raw.slice(0, 200)}`);
+  }
+  const info = parsed?.result?.process_info;
+  const shell = info?.shell_pid;
+  const pgid = info?.foreground_process_group_id;
+  if (typeof shell !== "number" || typeof pgid !== "number") {
+    throw new Error("herdr pane process-info returned no process ids");
+  }
+  return pgid === shell;
+}
+
+/** argv for `tmux display-message` that prints the pane's foreground command. */
+export function buildTmuxIdleQueryArgs(paneId: string): string[] {
+  return ["display-message", "-p", "-t", paneId, "#{pane_current_command}"];
+}
+
+const TMUX_SHELLS = new Set([
+  "sh", "bash", "zsh", "fish", "dash", "ksh", "nu", "pwsh", "powershell", "cmd",
+]);
+
+/** Idle iff tmux's pane_current_command is a shell (leading '-' stripped). */
+export function parseTmuxIdle(raw: string): boolean {
+  const cmd = raw.trim().toLowerCase().replace(/^-/, "");
+  if (!cmd) throw new Error("tmux display-message printed no current command");
+  return TMUX_SHELLS.has(cmd);
 }
 
 function herdrBackend(parentPane: string): MuxBackend {
@@ -278,7 +331,15 @@ function herdrBackend(parentPane: string): MuxBackend {
         const raw = execFileSync("herdr", ["pane", "list"], { encoding: "utf8" });
         const panes = parseHerdrPaneList(raw);
         const parent = panes.find((p) => p.paneId === parentPane);
-        return findDedupPane(panes, parentPane, parent?.tabId, label);
+        return findDedupPanes(panes, parentPane, parent?.tabId, label);
+      } catch {
+        return [];
+      }
+    },
+    idle(paneId) {
+      try {
+        const raw = execFileSync("herdr", buildHerdrProcessInfoArgs(paneId), { encoding: "utf8" });
+        return parseHerdrProcessIdle(raw);
       } catch {
         return undefined;
       }
@@ -321,7 +382,15 @@ function tmuxBackend(parentPane: string): MuxBackend {
         const winRaw = execFileSync("tmux", buildTmuxWindowQueryArgs(parentPane), { encoding: "utf8" });
         const windowId = parseWindowId(winRaw);
         const raw = execFileSync("tmux", buildTmuxListPanesArgs(windowId), { encoding: "utf8" });
-        return findDedupPane(parseTmuxPaneList(raw, windowId), parentPane, windowId, label);
+        return findDedupPanes(parseTmuxPaneList(raw, windowId), parentPane, windowId, label);
+      } catch {
+        return [];
+      }
+    },
+    idle(paneId) {
+      try {
+        const raw = execFileSync("tmux", buildTmuxIdleQueryArgs(paneId), { encoding: "utf8" });
+        return parseTmuxIdle(raw);
       } catch {
         return undefined;
       }
@@ -339,7 +408,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "Run a long-running local process (dev server, watcher, notebook, compiler, etc.) in its OWN side pane beside the agent, instead of backgrounding it in bash. " +
       "Splits a new pane in the same herdr tab / same tmux window, names it after the process, and runs the command in that pane's interactive shell. " +
-      "If a pane with the same `name` already exists in the current tab, it reuses that pane instead of splitting a duplicate (pass `force: true` to split anyway). " +
+      "If a pane with the same `name` already exists in the current tab, it reuses that pane: starts the command there if the pane is idle, or leaves a running process alone (pass `force: true` to split anyway). " +
       "Logs stream there; Ctrl-C in that pane stops it. " +
       "Use this instead of `&`, `nohup`, or `disown` for any process that stays alive.",
     promptSnippet: "Run a long-running local process in a side pane — never background it in bash",
@@ -347,7 +416,7 @@ export default function (pi: ExtensionAPI) {
       "Use split_pane for ANY long-running local process: `./gradlew bootRun`, `./mvnw spring-boot:run`, `flutter run`, `cargo run`, `go run .`, `docker compose up`, `uv run uvicorn app:app`, `python manage.py runserver`, `python -m http.server`, `npm run dev`, `storybook`, notebook servers, watch tasks, etc.",
       "Never background a long-running process yourself with `&`, `nohup`, or `disown` — always call split_pane so it lands in a named, watchable side pane.",
       "Give it a short human-readable `name` so the user can tell panes apart (e.g. 'api', 'storybook', 'watcher').",
-      "split_pane dedups by pane `name`: if a pane with the same `name` already exists in the current tab, it reuses that pane instead of splitting a duplicate. Give the same process the same `name` every time (e.g. always 'api' for the API server) — asking to start it again then points at the running pane instead of spawning a duplicate. Pass `force: true` only when you genuinely want a second instance.",
+      "split_pane dedups by pane `name`: if a pane with the same `name` already exists in the current tab, it reuses that pane — starts the command there if the pane is idle, or leaves it if a process is already running. Give the same process the same `name` every time (e.g. always 'api' for the API server). Do not close the pane or pass force: true to restart; stop the process (Ctrl-C) and call split_pane again. Pass `force: true` only when you genuinely want a second instance.",
       "Before splitting you can check what's already running with `herdr pane list` (or `tmux list-panes`) — though split_pane's own dedup usually makes that unnecessary.",
       "For quick one-shot commands (tests, lint, `ls`) use the bash tool normally — split_pane is for processes that stay running.",
     ],
@@ -389,21 +458,43 @@ export default function (pi: ExtensionAPI) {
 
       // Dedup: the model's context can't be trusted to remember which panes
       // exist (prunes, new sessions, panes the user closed), so the tool
-      // checks the mux itself before splitting a duplicate.
+      // checks the mux itself. Idle same-name pane → run there; busy → leave.
       if (params.force !== true) {
-        const existing = backend.find(label);
-        if (existing) {
+        const picked = pickReuseTarget(backend.find(label), (id) => backend.idle(id));
+        if (picked) {
+          if (!picked.run) {
+            return {
+              content: [{
+                type: "text",
+                text:
+                  `Pane ${picked.pane.paneId} ("${label}") is already running a process — reusing it. ` +
+                  `Logs stream there. Pass force: true only for a second instance.`,
+              }],
+              details: {
+                paneId: picked.pane.paneId, backend: backend.kind, label, command, cwd,
+                reused: true, running: true,
+              },
+            };
+          }
+          try {
+            backend.run(picked.pane.paneId, command);
+          } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            throw new Error(
+              `split_pane: found existing pane ${picked.pane.paneId} (${label}) but failed to start the command: ${msg}. ` +
+              `Run \`${command}\` in that pane.`,
+            );
+          }
           return {
             content: [{
               type: "text",
               text:
-                `Pane ${existing.paneId} ("${label}") already exists in this tab — reusing it instead of splitting a duplicate. ` +
-                `If its process is still running, you're set (logs stream in that pane). ` +
-                `If it died, Ctrl-C in that pane and re-run \`${command}\` there, ` +
-                `or call split_pane with force: true for a fresh pane.`,
+                `Started \`${command}\` in existing pane ${picked.pane.paneId} (${backend.kind}, label "${label}"). ` +
+                `Logs stream there beside the agent. ` +
+                `Stop it: ${backend.stopHint(picked.pane.paneId)}.`,
             }],
             details: {
-              paneId: existing.paneId, backend: backend.kind, label, command, cwd, reused: true,
+              paneId: picked.pane.paneId, backend: backend.kind, label, command, cwd, reused: true,
             },
           };
         }

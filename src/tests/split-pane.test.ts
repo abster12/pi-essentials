@@ -5,12 +5,17 @@ import {
   buildTmuxListPanesArgs,
   buildTmuxSplitArgs,
   buildTmuxWindowQueryArgs,
-  findDedupPane,
+  buildHerdrProcessInfoArgs,
+  buildTmuxIdleQueryArgs,
+  findDedupPanes,
   parseDirection,
   parseHerdrPaneList,
+  parseHerdrProcessIdle,
   parseSplitPaneId,
+  parseTmuxIdle,
   parseTmuxPaneList,
   parseWindowId,
+  pickReuseTarget,
   resolveMux,
   sanitizePaneName,
   validateSplitParams,
@@ -182,52 +187,127 @@ describe("parseHerdrPaneList", () => {
   });
 });
 
-// findDedupPane: the dedup decision itself. Same label in the parent's own
-// tab → reuse; anything else (other tab, agent pane, the parent itself, no
-// known parent tab) → undefined, i.e. split a fresh pane.
-describe("findDedupPane", () => {
+// findDedupPanes: same label in the parent's own tab → reuse candidates;
+// anything else (other tab, agent pane, the parent itself, no known parent
+// tab) → [], i.e. split a fresh pane.
+describe("findDedupPanes", () => {
   const panes = [
     { paneId: "w1:pC", label: "expo", tabId: "w1:t4", isAgent: false },
+    { paneId: "w1:pH", label: "expo", tabId: "w1:t4", isAgent: false },
     { paneId: "w1:pD", label: "expo", tabId: "w1:t5", isAgent: false },
     { paneId: "w1:pE", label: "expo", tabId: "w1:t4", isAgent: true },
     { paneId: "w1:pF", label: "api", tabId: "w1:t4", isAgent: false },
     { paneId: "w1:pG", label: "watcher", tabId: "w1:t4", isAgent: false },
   ];
-  it("matches the same label in the same tab", () => {
-    assert.equal(findDedupPane(panes, "w1:p1", "w1:t4", "expo")?.paneId, "w1:pC");
+  it("matches the same label in the same tab (all of them)", () => {
+    assert.deepEqual(
+      findDedupPanes(panes, "w1:p1", "w1:t4", "expo").map((p) => p.paneId),
+      ["w1:pC", "w1:pH"],
+    );
   });
   it("ignores same-label panes in other tabs", () => {
-    // Only w1:pD (other tab) carries "expo" with parent tab w1:t5.
-    assert.equal(findDedupPane(panes, "w1:p1", "w1:t5", "expo")?.paneId, "w1:pD");
+    assert.deepEqual(
+      findDedupPanes(panes, "w1:p1", "w1:t5", "expo").map((p) => p.paneId),
+      ["w1:pD"],
+    );
   });
   it("never matches an agent (pi session) pane", () => {
-    // w1:pE is the only "expo" in t4 besides the real pane — exclude it and
-    // the only remaining candidate is an agent pane → no match.
     const onlyAgent = [
       { paneId: "w1:pE", label: "expo", tabId: "w1:t4", isAgent: true },
     ];
-    assert.equal(findDedupPane(onlyAgent, "w1:p1", "w1:t4", "expo"), undefined);
+    assert.deepEqual(findDedupPanes(onlyAgent, "w1:p1", "w1:t4", "expo"), []);
   });
   it("never matches the parent pane itself", () => {
-    // w1:pG is both the parent and the only match → no self-reuse.
-    assert.equal(findDedupPane(panes, "w1:pG", "w1:t4", "watcher"), undefined);
+    assert.deepEqual(findDedupPanes(panes, "w1:pG", "w1:t4", "watcher"), []);
   });
-  it("returns undefined when the parent tab is unknown (don't guess)", () => {
-    assert.equal(findDedupPane(panes, "w1:p1", undefined, "expo"), undefined);
+  it("returns [] when the parent tab is unknown (don't guess)", () => {
+    assert.deepEqual(findDedupPanes(panes, "w1:p1", undefined, "expo"), []);
   });
-  it("returns undefined when nothing matches", () => {
-    assert.equal(findDedupPane(panes, "w1:p1", "w1:t4", "storybook"), undefined);
+  it("returns [] when nothing matches", () => {
+    assert.deepEqual(findDedupPanes(panes, "w1:p1", "w1:t4", "storybook"), []);
   });
   it("matches labels exactly (case-sensitive, no prefix guessing)", () => {
-    assert.equal(findDedupPane(panes, "w1:p1", "w1:t4", "expo")?.paneId, "w1:pC");
-    assert.equal(findDedupPane(panes, "w1:p1", "w1:t4", "Exp"), undefined);
-    assert.equal(findDedupPane(panes, "w1:p1", "w1:t4", "exp"), undefined);
+    assert.equal(findDedupPanes(panes, "w1:p1", "w1:t4", "expo")[0]?.paneId, "w1:pC");
+    assert.deepEqual(findDedupPanes(panes, "w1:p1", "w1:t4", "Exp"), []);
+    assert.deepEqual(findDedupPanes(panes, "w1:p1", "w1:t4", "exp"), []);
+  });
+});
+
+// pickReuseTarget: busy same-named pane wins (leave it); else run in the first.
+describe("pickReuseTarget", () => {
+  const a = { paneId: "w1:pC", label: "expo", tabId: "w1:t4", isAgent: false };
+  const b = { paneId: "w1:pH", label: "expo", tabId: "w1:t4", isAgent: false };
+  const idle = new Map<string, boolean | undefined>([
+    ["w1:pC", true],
+    ["w1:pH", true],
+  ]);
+  const idleOf = (id: string) => idle.get(id);
+  it("returns undefined when there are no candidates", () => {
+    assert.equal(pickReuseTarget([], idleOf), undefined);
+  });
+  it("runs in the first pane when all are idle or unknown", () => {
+    assert.deepEqual(pickReuseTarget([a, b], idleOf), { pane: a, run: true });
+    idle.set("w1:pC", undefined);
+    assert.deepEqual(pickReuseTarget([a, b], idleOf), { pane: a, run: true });
+  });
+  it("leaves a busy pane even if an earlier one is idle", () => {
+    idle.set("w1:pC", true);
+    idle.set("w1:pH", false);
+    assert.deepEqual(pickReuseTarget([a, b], idleOf), { pane: b, run: false });
+  });
+});
+
+describe("parseHerdrProcessIdle", () => {
+  it("is idle when the foreground pgid is the shell", () => {
+    const raw = JSON.stringify({
+      result: { process_info: { shell_pid: 72386, foreground_process_group_id: 72386 } },
+    });
+    assert.equal(parseHerdrProcessIdle(raw), true);
+  });
+  it("is busy when a job owns the foreground pgid", () => {
+    const raw = JSON.stringify({
+      result: { process_info: { shell_pid: 31622, foreground_process_group_id: 31659 } },
+    });
+    assert.equal(parseHerdrProcessIdle(raw), false);
+  });
+  it("throws on non-JSON or missing ids", () => {
+    assert.throws(() => parseHerdrProcessIdle("not json"), /non-JSON/);
+    assert.throws(() => parseHerdrProcessIdle("{}"), /no process ids/);
+  });
+});
+
+describe("parseTmuxIdle", () => {
+  it("treats shells (and login -zsh) as idle", () => {
+    assert.equal(parseTmuxIdle("zsh\n"), true);
+    assert.equal(parseTmuxIdle("-zsh"), true);
+    assert.equal(parseTmuxIdle("bash"), true);
+  });
+  it("treats a real command as busy", () => {
+    assert.equal(parseTmuxIdle("node"), false);
+    assert.equal(parseTmuxIdle("npm"), false);
+  });
+  it("throws on empty output", () => {
+    assert.throws(() => parseTmuxIdle("  \n"), /no current command/);
+  });
+});
+
+describe("buildHerdrProcessInfoArgs", () => {
+  it("asks process-info for a pane", () => {
+    assert.deepEqual(buildHerdrProcessInfoArgs("w1:pC"), ["pane", "process-info", "--pane", "w1:pC"]);
+  });
+});
+
+describe("buildTmuxIdleQueryArgs", () => {
+  it("asks display-message for the pane's current command", () => {
+    assert.deepEqual(buildTmuxIdleQueryArgs("%5"), [
+      "display-message", "-p", "-t", "%5", "#{pane_current_command}",
+    ]);
   });
 });
 
 // tmux dedup plumbing: window query, pane listing, and line parsing. The
 // window id is tmux's "tab", so list results are tagged with it for the
-// same-tab scoping findDedupPane enforces.
+// same-tab scoping findDedupPanes enforces.
 describe("buildTmuxWindowQueryArgs", () => {
   it("asks display-message for the parent's window id", () => {
     assert.deepEqual(buildTmuxWindowQueryArgs("%5"), ["display-message", "-p", "-t", "%5", "#{window_id}"]);

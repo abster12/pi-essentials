@@ -45,7 +45,7 @@ function readClipboardImage() {
 }
 function sendImage(pi, data, mime, prompt, isIdle) {
   const content = [
-    { type: "image", source: { type: "base64", mediaType: mime, data } },
+    { type: "image", data, mimeType: mime },
     { type: "text", text: prompt || "Here's a screenshot." }
   ];
   if (isIdle) {

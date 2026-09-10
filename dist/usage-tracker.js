@@ -4,13 +4,16 @@ import { Type } from "@sinclair/typebox";
 var OPENCODE_GO_USAGE = "https://opencode.ai/zen/go/v1/usage";
 var XAI_BILLING = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 var XAI_SETTINGS = "https://cli-chat-proxy.grok.com/v1/settings";
+var OPENAI_CODEX_USAGE = "https://chatgpt.com/backend-api/wham/usage";
+var OPENAI_AUTH_CLAIM = "https://api.openai.com/auth";
 var CACHE_MS = 6e4;
 var WARN_AT = 80;
 var PROVIDERS = [
   { id: "opencode-go", short: "go", name: "OpenCode Go", fetch: fetchOpencodeGo },
   { id: "opencode", short: "zen", name: "OpenCode Zen" },
   { id: "cursor", short: "cursor", name: "Cursor" },
-  { id: "xai", short: "xai", name: "xAI", fetch: fetchXai }
+  { id: "xai", short: "xai", name: "xAI", fetch: fetchXai },
+  { id: "openai-codex", short: "oai", name: "OpenAI Codex", fetch: fetchOpenAICodex }
 ];
 function parseOpencodeUsage(json) {
   const usage = json?.usage;
@@ -111,6 +114,68 @@ async function fetchXai(apiKey, signal) {
   const tier = settings.ok ? parseXaiTier(await settings.json()) : void 0;
   return parseXaiBilling(await billing.json(), tier);
 }
+function durationName(seconds) {
+  if (seconds === 18e3) return "5h";
+  if (seconds === 604800) return "weekly";
+  if (seconds >= 86400) return `${Math.round(seconds / 86400)}d`;
+  if (seconds >= 3600) return `${Math.round(seconds / 3600)}h`;
+  return `${Math.round(seconds)}s`;
+}
+function unixIso(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return void 0;
+  return new Date(n > 1e12 ? n : n * 1e3).toISOString();
+}
+function parseCodexWindow(rec, fallback) {
+  if (!rec || typeof rec !== "object") return void 0;
+  const row = rec;
+  const percent = Number(row.used_percent);
+  if (!Number.isFinite(percent)) return void 0;
+  const seconds = Number(row.limit_window_seconds);
+  return {
+    name: Number.isFinite(seconds) && seconds > 0 ? durationName(seconds) : fallback,
+    percent,
+    status: "ok",
+    resetsAt: unixIso(row.reset_at)
+  };
+}
+function parseOpenAICodexUsage(json) {
+  if (!json || typeof json !== "object") throw new Error("bad usage payload");
+  const rec = json;
+  const out = [];
+  if (typeof rec.plan_type === "string" && rec.plan_type.trim()) {
+    out.push({ name: "plan", percent: 0, status: "ok", text: rec.plan_type.trim() });
+  }
+  const rate = rec.rate_limit && typeof rec.rate_limit === "object" ? rec.rate_limit : void 0;
+  const primary = parseCodexWindow(rate?.primary_window, "primary");
+  const secondary = parseCodexWindow(rate?.secondary_window, "secondary");
+  if (primary) out.push(primary);
+  if (secondary) out.push(secondary);
+  if (out.length === 0) throw new Error("no usage windows");
+  return out;
+}
+function accountIdFromToken(token) {
+  const payload = token.split(".")[1];
+  if (!payload) throw new Error("no account id");
+  const json = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  const auth = json[OPENAI_AUTH_CLAIM];
+  const id = auth && typeof auth === "object" ? auth.chatgpt_account_id : void 0;
+  if (typeof id !== "string" || !id) throw new Error("no account id");
+  return id;
+}
+async function fetchOpenAICodex(apiKey, signal) {
+  const res = await fetch(OPENAI_CODEX_USAGE, {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "chatgpt-account-id": accountIdFromToken(apiKey),
+      Accept: "application/json",
+      originator: "pi"
+    },
+    signal
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return parseOpenAICodexUsage(await res.json());
+}
 function hottest(windows) {
   return windows.reduce((a, b) => b.percent > a.percent ? b : a);
 }
@@ -133,8 +198,8 @@ function formatFooter(rows) {
     if (r.kind !== "ok") return [];
     const metered = r.windows.filter((w) => !w.text);
     if (metered.length > 0) {
-      const w = hottest(metered);
-      return [`${r.short}-${w.name} ${Math.round(w.percent)}%`];
+      const shown = r.id === "openai-codex" ? metered : [hottest(metered)];
+      return shown.map((w) => `${r.short}-${w.name} ${Math.round(w.percent)}%`);
     }
     const text = r.windows[0]?.text;
     return [text ? `${r.short} ${text}` : r.short];
@@ -273,6 +338,7 @@ export {
   formatFooter,
   formatReport,
   hottest,
+  parseOpenAICodexUsage,
   parseOpencodeUsage,
   parseXaiBilling,
   parseXaiTier,

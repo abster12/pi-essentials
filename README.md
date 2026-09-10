@@ -2,7 +2,7 @@
 
 Essential extensions for [pi](https://github.com/earendil-works/pi). Quality-of-life improvements that every setup should have.
 
-This is a fork of [samfoy/pi-essentials](https://github.com/samfoy/pi-essentials) (published on npm as `@samfp/pi-essentials`). It keeps the upstream extensions and adds durable subagents, herdr-first pane tooling, `split_pane`, smarter tab/session naming, and a few other fixes (see [What's new in this fork](#whats-new-in-this-fork)).
+This is a fork of [samfoy/pi-essentials](https://github.com/samfoy/pi-essentials) (published on npm as `@samfp/pi-essentials`). It keeps the upstream extensions and adds herdr-first pane tooling, `split_pane`, smarter tab/session naming, and a few other fixes (see [What's new in this fork](#whats-new-in-this-fork)).
 
 ## Install
 
@@ -30,7 +30,6 @@ pi install -l .
 
 | Extension | What it does |
 | --- | --- |
-| **Subagent** | `subagent`, `subagent_status`, and `subagent_kill` tools that spawn durable background or interactive pi subagents whose results auto-inject back |
 | **Split Pane** | `split_pane` tool that runs any long-running local process (dev server, watcher, notebook…) in a named side pane beside the agent |
 | **Auto Session Name** | Names sessions from the first user message as a short hyphenated slug, so you don't get `unnamed-session-1` or a truncated sentence |
 | **Auto Title** | Names the host terminal tab/pane from that same slug (herdr preferred, tmux fallback) |
@@ -43,7 +42,7 @@ pi install -l .
 | **Daily Log** | `daily_log` tool that appends timestamped entries to a daily markdown note (configurable via env vars) |
 | **Meat** | `/meat` command (run [meat](https://github.com/boldsoftware/meat), save to `.meat/latest.diff`, inject the reading diff), plus `meat_annotate` tool + `/meat-annotate` command that open the reading diff in the [Plannotator](https://github.com/backnotprop/plannotator) browser UI (via its official pi extension's shared event API) and return the user's verdict + annotations to the agent |
 | **Token Tracker** | `token_tracker` tool + `/tokens` command that aggregate LLM token usage and cost per model — pi's own usage parsed from session transcripts, plus the opencode CLI's ledger queried directly from its SQLite database |
-| **Usage Tracker** | `/usage` widget + `usage_tracker` tool showing remaining subscription quota (used % / left % / reset) for linked providers. OpenCode Go and xAI are fetched live; Cursor is listed as linked because it has no remaining-quota API |
+| **Usage Tracker** | `/usage` widget + `usage_tracker` tool showing remaining subscription quota (used % / left % / reset) for linked providers. OpenCode Go, xAI, and OpenAI Codex are fetched live; Cursor is listed as linked because it has no remaining-quota API |
 | **Handoff** | `/handoff <topic>` writes a session handoff doc (git state and session file auto-gathered, agent authors the summary); `/handoff` in a new session picks a doc and injects it as the first message — no manual "read the handoff" instruction |
 | **BTW** | `/btw` side-chat popover for quick tangential questions, with thread restore/reset and optional summary injection into the main chat |
 | **Files** | `/files` browser (also Ctrl+Shift+O) with git status and session file references, plus reveal/Quick Look/open/edit/diff-in-VS-Code actions; Ctrl+Shift+R Quick Looks the latest referenced file |
@@ -51,7 +50,6 @@ pi install -l .
 | **No Sleep** | `/no-sleep` macOS `caffeinate` integration that prevents sleep while an agent turn or the whole session is active (`PI_NO_SLEEP`/`PI_NO_SLEEP_SCOPE`/`PI_NO_SLEEP_DISPLAY` env vars) |
 | **Split Fork** | `/split-fork [prompt]` branches the current session into a new pi process in a right-hand Ghostty split (macOS) |
 | **Whimsical** | Replaces the default thinking/status text with a random whimsical phrase while the agent works (`Combobulating...`, `Bribing the byte fairies...`) |
-| **CD** | `/cd [dir]` changes the session working directory mid-chat (bash-style: bare `/cd` → home, `/cd -` → previous). Shell commands and file tools follow; the model is told via an appended reminder so the prompt cache stays intact |
 
 ## Skills
 
@@ -65,43 +63,21 @@ The package ships two agent skills (kept in `skills/` for reference, not registe
 On top of the upstream extension set:
 
 - **Agent-stuff port.** `/btw`, `/files`, `/goal`, `/no-sleep`, and `/split-fork` plus the `commit` and `frontend-design` skills are ported from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) and adapted to pi 0.83's API (the `goal` tool schema uses `Type.Union` literals instead of `StringEnum`, and the BTW resource loader implements 0.83's source-returning methods).
-- **Herdr compatibility.** Interactive subagents, `split_pane`, and auto-title prefer [herdr](https://herdr.dev/) when pi is running inside it (`HERDR_ENV=1`). Upstream interactive subagents were tmux-only; this fork detects herdr first, drives `herdr pane` / `herdr agent` / `herdr tab`, and falls back to tmux when herdr isn't present.
-- **Durable subagents.** Background runs persist their transcript under `~/.pi/agent/subagent-sessions/`. On a clean finish the file is deleted; on a crash, kill, or API-credit death it survives and can be resumed with `/resume-subagent`. Runs stream JSON events for a live progress widget showing turns, token usage, cost, and model.
-- **Interactive subagents.** `subagent` with `interactive: true` spawns a steerable pi session in its own pane via `herdr agent start` when inside herdr, otherwise a tmux window. Results still auto-inject when done. The pane/tab is named after the task.
-- **`subagent_kill` + timeouts.** Kill a subagent by ID or let it auto-kill after a timeout (`timeout` param, default 10 minutes).
-- **Failure diagnostics.** Crashed runs report exit code, signal, stderr, a trail of the tool calls it made, and partial output. Event logs are kept at `/tmp/subagent-<id>-events.jsonl` for post-mortem (`jq . < file`).
-- **`split_pane` tool.** Splits a named side pane (herdr preferred, tmux fallback) and runs any long-running command in its interactive shell: `./gradlew bootRun`, `flutter run`, `docker compose up`, `npm run dev`… The agent pane keeps focus; logs stream in the pane and Ctrl-C there stops the process. Dedups by pane `name`: if a pane with the same name already exists in the current tab, it reuses that pane instead of splitting a duplicate (the model's context is lossy, so the tool checks the mux itself — pass `force: true` for a second instance).
+- **Herdr compatibility.** `split_pane` and auto-title prefer [herdr](https://herdr.dev/) when pi is running inside it (`HERDR_ENV=1`), and fall back to tmux. Subagents are not shipped here — install [`pi-subagents`](https://pi.dev/packages/pi-subagents) (`pi install npm:pi-subagents`).
+- **`split_pane` tool.** Splits a named side pane (herdr preferred, tmux fallback) and runs any long-running command in its interactive shell: `./gradlew bootRun`, `flutter run`, `docker compose up`, `npm run dev`… The agent pane keeps focus; logs stream in the pane and Ctrl-C there stops the process. Dedups by pane `name`: if a pane with the same name already exists in the current tab, it reuses that pane (starts the command there if idle, leaves a running process alone). Pass `force: true` for a second instance.
 - **Slug-based tab/session names.** Auto-title and auto-session-name share one `titleFromPrompt` policy that turns a long first message into a 3-4 word hyphenated slug (`fix-login-page`) instead of truncating the sentence. Auto-title refreshes when the session gets a proper name (e.g. from auto-session-name or `/name`), and renames the herdr pane *and* its tab, or the tmux window/pane.
-- **`PI_TAB_LABEL` integration.** The subagent spawner sets `PI_TAB_LABEL` on interactive subagent panes so the tab and session show the task instead of the framed prompt; auto-title and auto-session-name honor it.
+- **`PI_TAB_LABEL` integration.** Auto-title and auto-session-name honor `PI_TAB_LABEL` when set (e.g. by herdr or another extension).
 - **Smarter compact header.** Resolves the *host* pi version by walking up from the running binary (the linked package can lag behind), and shows provider, model, thinking level, available prompts and skills.
 - **Precompiled build.** All extensions are bundled to `dist/*.js` with esbuild so pi loads them without per-startup jiti transpilation; `npm test` runs `tsc --noEmit` plus unit tests.
 - **Meat.** One extension for the meat reading-diff abridger: `/meat` runs it and injects the abridged diff into the conversation (full output saved to `.meat/latest.diff`), while `meat_annotate` / `/meat-annotate` run meat and open the reading diff in Plannotator's browser annotation UI over the shared `plannotator:request` event channel of the official `@plannotator/pi-extension`. Blocks until the user approves, annotates, or closes; the verdict and feedback come back to the agent as instructions. The opencode backend work in meat is orthogonal — this works with whatever model backend meat uses today.
 - **Token tracker.** `token_tracker` tool + `/tokens` command report per-model token usage and cost from two streams: pi's own session transcripts (`~/.pi/agent/sessions`, `subagent-sessions` — every assistant message carries provider/model/usage) and the opencode CLI's SQLite ledger (`~/.local/share/opencode/opencode.db`, the data behind `opencode stats`, queried via `node:sqlite`). Model variants merge; `--days N` and `--source pi|opencode|all` filter the report.
-- **Usage tracker.** `/usage` prints a remaining-quota report (not sent to the model; also a `usage_tracker` tool). Footer shows `go-weekly 40% · xai SuperGrok`. OpenCode Go is fetched from `GET https://opencode.ai/zen/go/v1/usage` (rolling / weekly / monthly used %). xAI is fetched from the grok CLI billing proxy (plan / credits / monthly / on-demand). Cursor has no remaining-quota API, so it is omitted from the footer. `/usage hide` clears the footer. Warns at 80% used. `/tokens` is spend; this is remaining allowance.
+- **Usage tracker.** `/usage` prints a remaining-quota report (not sent to the model; also a `usage_tracker` tool). Footer shows `go-weekly 40% · xai SuperGrok · oai-5h 48% · oai-weekly 7%`. OpenCode Go is fetched from `GET https://opencode.ai/zen/go/v1/usage` (rolling / weekly / monthly used %). xAI is fetched from the grok CLI billing proxy (plan / credits / monthly / on-demand). OpenAI Codex (ChatGPT Plus/Pro) is fetched from `GET https://chatgpt.com/backend-api/wham/usage` (5h + weekly used %). Cursor has no remaining-quota API, so it is omitted from the footer. `/usage hide` clears the footer. Warns at 80% used. `/tokens` is spend; this is remaining allowance.
 
 ## Usage
 
-### Subagents (agent tools)
-
-The model can use these tools. You'll usually just ask it to spawn a subagent:
-
-- `subagent {id, task, workingDir?, interactive?, timeout?}`: spawn a background pi subagent. Give it a short id (`cr-review`, `coverage-check`) and a self-contained task. Live progress appears in a widget; results auto-inject as a message when done.
-  - `interactive: true`: spawn a full interactive pi in a herdr pane (or tmux window) you can steer; requires herdr or tmux.
-  - `timeout`: minutes before the subagent is auto-killed (default 10).
-- `subagent_status`: list running subagents with elapsed time, mode, current activity, and usage.
-- `subagent_kill {id}`: terminate a running subagent.
-
-### Resuming crashed subagents (user command)
-
-```bash
-/resume-subagent          # pick a crashed session to resume (switches into it)
-/resume-subagent list     # show saved crash files with relative times
-/resume-subagent purge    # delete all saved crash files
-```
-
 ### Side panes (agent tool)
 
-- `split_pane {command, name, cwd?, direction?, force?}`: run a long-running process in its own named side pane. `command` is the exact shell command (env vars, `&&`, pipes all work); `name` is the pane label shown in the tab strip (e.g. `api`, `storybook`, `watcher`); `direction` is `right` (default) or `down`. Ctrl-C in the pane stops the process. If a pane with the same `name` already exists in the current tab, the tool points you at it instead of splitting a duplicate (pass `force: true` to split a second instance anyway).
+- `split_pane {command, name, cwd?, direction?, force?}`: run a long-running process in its own named side pane. `command` is the exact shell command (env vars, `&&`, pipes all work); `name` is the pane label shown in the tab strip (e.g. `api`, `storybook`, `watcher`); `direction` is `right` (default) or `down`. Ctrl-C in the pane stops the process. If a pane with the same `name` already exists in the current tab, the tool reuses it: starts the command there if the pane is idle, or leaves a running process alone (pass `force: true` to split a second instance).
 
 ### Other tools and commands
 
@@ -123,13 +99,12 @@ The model can use these tools. You'll usually just ask it to spawn a subagent:
 - `edit` (agent tool): accepts one `text` payload — a marked row script (`[path]` headers, `@REPLACE`/`@INS.PRE N`/`@INS.POST N`/`@INS.BEFORE`/`@INS.AFTER`/`@DEL N-M`/`@APPEND` with `+`/`-` rows) or a Codex-style `*** Begin Patch` … `*** End Patch` patch. Validates everything before touching files and shows a live diff preview in the tool header.
 - `/no-sleep [status|on|off|toggle|agent|session]`: prevent macOS sleep via `caffeinate` while the agent is running (default scope) or for the whole session. `PI_NO_SLEEP_DISPLAY=1` also keeps the display awake; the assertion dies with the pi process.
 - `/split-fork [prompt]`: fork the current session (committed state only) into a new pi process in a right-hand Ghostty split; the fork resumes from the same session branch.
-- `/cd [dir]`: change the session working directory without restarting. Bare `/cd` goes home, `/cd -` goes back, `~` expands. Tab completes directories from the current session dir (dirs only; hidden ones only if you type `.`). Bash commands run in the new folder; relative paths on read/edit/write/grep/find/ls are rewritten to match. The system prompt is left alone (changing it would bust the prompt cache) — a hidden reminder is appended instead so the model knows.
 
 ### Configuration
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
-| `PI_TAB_LABEL` | - | Pins the tab/session label (set by the subagent spawner for interactive runs) |
+| `PI_TAB_LABEL` | - | Pins the tab/session label |
 | `HERDR_ENV` / `HERDR_PANE_ID` / `HERDR_TAB_ID` | set by herdr | Detected automatically when pi runs inside herdr; not something you set by hand |
 | `DAILY_LOG_DIR` | `~/daily-notes` | Directory for daily notes |
 | `DAILY_LOG_SECTION` | `## Journal` | Section header new entries are appended under |
@@ -146,8 +121,7 @@ The model can use these tools. You'll usually just ask it to spawn a subagent:
 - pi 0.57+ (peer dependency)
 - **Meat.** Needs `meat` on PATH (`go install meat.dev/cmd/meat@latest`) with API keys for its model backend; the annotate flows additionally need the official Plannotator pi extension installed (`pi install npm:@plannotator/pi-extension`).
 - **Token Tracker.** The pi stream needs nothing extra (it reads pi's own session transcripts). The opencode stream needs the opencode CLI's ledger (`~/.local/share/opencode/opencode.db`, created by opencode 1.x) and Node ≥ 22.5 for `node:sqlite`.
-- **Herdr (preferred) or tmux.** Interactive subagents, `split_pane`, and herdr tab naming need one of these. Herdr wins when `HERDR_ENV=1` and `HERDR_PANE_ID` are set; otherwise tmux is used when available.
-- **Subagents.** Background mode works anywhere; `interactive: true` needs herdr or tmux.
+- **Herdr (preferred) or tmux.** `split_pane` and herdr tab naming need one of these. Herdr wins when `HERDR_ENV=1` and `HERDR_PANE_ID` are set; otherwise tmux is used when available.
 - **Split Pane.** Pi must be running inside herdr or tmux (it refuses to run otherwise, so the process stays visible).
 - **Auto Title.** Works standalone for OSC title escape sequences; herdr naming needs `herdr` on PATH inside a herdr pane, tmux fallback needs `tmux`.
 - **Screenshots.** Kitty terminal with `clipboard_control read-clipboard`, tmux with `allow-passthrough on`, `~/.local/bin/kitten` on the remote.

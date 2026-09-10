@@ -70,9 +70,9 @@ function readClipboardImage(): { data: string; mime: MediaType } | null {
 }
 
 function sendImage(pi: ExtensionAPI, data: string, mime: MediaType, prompt: string, isIdle: boolean) {
-	const content: any[] = [
-		{ type: "image", source: { type: "base64", mediaType: mime, data } },
-		{ type: "text", text: prompt || "Here's a screenshot." },
+	const content = [
+		{ type: "image" as const, data, mimeType: mime },
+		{ type: "text" as const, text: prompt || "Here's a screenshot." },
 	];
 
 	if (isIdle) {
