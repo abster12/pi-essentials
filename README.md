@@ -49,6 +49,7 @@ pi install -l .
 | **Goal** | `/goal <objective>` long-running objective mode with automatic continuation and the `get_goal`, `create_goal`, `update_goal` tools; token/time budgets, session-log persistence |
 | **No Sleep** | `/no-sleep` macOS `caffeinate` integration that prevents sleep while an agent turn or the whole session is active (`PI_NO_SLEEP`/`PI_NO_SLEEP_SCOPE`/`PI_NO_SLEEP_DISPLAY` env vars) |
 | **Split Fork** | `/split-fork [prompt]` branches the current session into a new pi process in a right-hand Ghostty split (macOS) |
+| **Session Control** | Opt-in inter-session RPC over Unix sockets (`--session-control`): `send_to_session`, `list_sessions`, `/control-sessions`, plus one-shot startup send flags |
 | **Whimsical** | Replaces the default thinking/status text with a random whimsical phrase while the agent works (`Combobulating...`, `Bribing the byte fairies...`) |
 
 ## Skills
@@ -62,7 +63,7 @@ The package ships two agent skills (kept in `skills/` for reference, not registe
 
 On top of the upstream extension set:
 
-- **Agent-stuff port.** `/btw`, `/files`, `/goal`, `/no-sleep`, and `/split-fork` plus the `commit` and `frontend-design` skills are ported from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) and adapted to pi 0.83's API (the `goal` tool schema uses `Type.Union` literals instead of `StringEnum`, and the BTW resource loader implements 0.83's source-returning methods).
+- **Agent-stuff port.** `/btw`, `/files`, `/goal`, `/no-sleep`, `/split-fork`, and session control (`--session-control`, `send_to_session`, `list_sessions`) plus the `commit` and `frontend-design` skills are ported from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) and adapted to pi 0.83's API (tool schemas use `Type.Union` literals instead of `StringEnum`, summarization uses `complete()` from `@earendil-works/pi-ai/compat`, and the BTW resource loader implements 0.83's source-returning methods).
 - **Herdr compatibility.** `split_pane` and auto-title prefer [herdr](https://herdr.dev/) when pi is running inside it (`HERDR_ENV=1`), and fall back to tmux. Subagents are not shipped here — install [`pi-subagents`](https://pi.dev/packages/pi-subagents) (`pi install npm:pi-subagents`).
 - **`split_pane` tool.** Splits a named side pane (herdr preferred, tmux fallback) and runs any long-running command in its interactive shell: `./gradlew bootRun`, `flutter run`, `docker compose up`, `npm run dev`… The agent pane keeps focus; logs stream in the pane and Ctrl-C there stops the process. Dedups by pane `name`: if a pane with the same name already exists in the current tab, it reuses that pane (starts the command there if idle, leaves a running process alone). Pass `force: true` for a second instance.
 - **Slug-based tab/session names.** Auto-title and auto-session-name share one `titleFromPrompt` policy that turns a long first message into a 3-4 word hyphenated slug (`fix-login-page`) instead of truncating the sentence. Auto-title refreshes when the session gets a proper name (e.g. from auto-session-name or `/name`), and renames the herdr pane *and* its tab, or the tmux window/pane.
@@ -99,12 +100,18 @@ On top of the upstream extension set:
 - `edit` (agent tool): accepts one `text` payload — a marked row script (`[path]` headers, `@REPLACE`/`@INS.PRE N`/`@INS.POST N`/`@INS.BEFORE`/`@INS.AFTER`/`@DEL N-M`/`@APPEND` with `+`/`-` rows) or a Codex-style `*** Begin Patch` … `*** End Patch` patch. Validates everything before touching files and shows a live diff preview in the tool header.
 - `/no-sleep [status|on|off|toggle|agent|session]`: prevent macOS sleep via `caffeinate` while the agent is running (default scope) or for the whole session. `PI_NO_SLEEP_DISPLAY=1` also keeps the display awake; the assertion dies with the pi process.
 - `/split-fork [prompt]`: fork the current session (committed state only) into a new pi process in a right-hand Ghostty split; the fork resumes from the same session branch.
+- `--session-control`: open a Unix socket at `~/.pi/session-control/<session-id>.sock` so other pi sessions can send, summarize, abort, or clear this one. Registers `send_to_session` and `list_sessions`. Sets `$PI_SESSION_ID`.
+- `send_to_session {sessionId|sessionName, action?, message?, mode?, wait_until?}`: send a steer or follow-up to another live session, or `get_message` / `get_summary` / `clear`. `wait_until=turn_end` waits for the reply.
+- `list_sessions`: list live sessions that expose a control socket.
+- `/control-sessions`: print the same live-session list in the chat.
+- One-shot startup send: `pi -p --session-control --control-session <name-or-id> --send-session-message <text>` with optional `--send-session-mode steer|follow_up`, `--send-session-wait turn_end|message_processed`, and `--send-session-include-sender-info`.
 
 ### Configuration
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `PI_TAB_LABEL` | - | Pins the tab/session label |
+| `PI_SESSION_ID` | set when `--session-control` is on | Current session id for child processes and scripts |
 | `HERDR_ENV` / `HERDR_PANE_ID` / `HERDR_TAB_ID` | set by herdr | Detected automatically when pi runs inside herdr; not something you set by hand |
 | `DAILY_LOG_DIR` | `~/daily-notes` | Directory for daily notes |
 | `DAILY_LOG_SECTION` | `## Journal` | Section header new entries are appended under |
